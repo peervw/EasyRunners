@@ -1,0 +1,63 @@
+[build-system]
+requires = ["hatchling>=1.27"]
+build-backend = "hatchling.build"
+
+[project]
+name = "easy-runners"
+version = "0.1.0"
+description = "Docker-native ephemeral GitHub Actions runner manager"
+readme = "README.md"
+requires-python = ">=3.12"
+license = { text = "Apache-2.0" }
+dependencies = [
+  "argon2-cffi>=23.1.0",
+  "docker>=7.1.0",
+  "fastapi>=0.116.0",
+  "httpx>=0.28.0",
+  "itsdangerous>=2.2.0",
+  "jinja2>=3.1.4",
+  "prometheus-client>=0.22.0",
+  "pydantic-settings>=2.10.0",
+  "pyjwt[crypto]>=2.10.0",
+  "python-multipart>=0.0.20",
+  "pyyaml>=6.0.2",
+  "structlog>=25.1.0",
+  "uvicorn[standard]>=0.35.0",
+]
+
+[project.scripts]
+easyrunners = "runner_manager.cli:main"
+
+[dependency-groups]
+dev = [
+  "mypy>=1.17.0",
+  "pytest>=8.4.0",
+  "pytest-asyncio>=1.1.0",
+  "pytest-cov>=6.2.0",
+  "respx>=0.22.0",
+  "ruff>=0.12.0",
+  "types-docker>=7.1.0",
+  "types-pyyaml>=6.0.12",
+]
+
+[tool.hatch.build.targets.wheel]
+packages = ["src/runner_manager"]
+
+[tool.pytest.ini_options]
+addopts = "-q --strict-markers"
+asyncio_mode = "auto"
+testpaths = ["tests"]
+
+[tool.ruff]
+line-length = 100
+target-version = "py312"
+
+[tool.ruff.lint]
+select = ["E", "F", "I", "UP", "B", "ASYNC", "S", "RUF"]
+ignore = ["S101"]
+
+[tool.mypy]
+python_version = "3.12"
+plugins = ["pydantic.mypy"]
+strict = true
+warn_unused_ignores = false

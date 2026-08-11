@@ -1,0 +1,24 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8">
+    <meta name="viewport" content="width=device-width,initial-scale=1">
+    <title>Sign in · EasyRunners</title>
+    <link rel="stylesheet" href="/static/app.css">
+  </head>
+  <body class="login-page">
+    <main class="login-card">
+      <div class="brand-mark">ER</div>
+      <h1>EasyRunners</h1>
+      <p class="muted">Ephemeral GitHub Actions capacity</p>
+      {% if error %}<div class="alert danger">{{ error }}</div>{% endif %}
+      <form method="post" action="/auth/login">
+        <input type="hidden" name="next_url" value="{{ next_url or '/' }}">
+        <label for="password">Administrator password</label>
+        <input id="password" name="password" type="password" autocomplete="current-password" required autofocus>
+        <button type="submit">Sign in</button>
+      </form>
+      <p class="hint">On first boot, find the one-time password in <code>docker compose logs manager</code>.</p>
+    </main>
+  </body>
+</html>

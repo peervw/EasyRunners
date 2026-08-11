@@ -1,0 +1,47 @@
+name: easy-runners
+
+services:
+  runner-image:
+    image: ${RUNNER_IMAGE:-ghcr.io/peervw/easy-runners-runner:latest}
+    entrypoint: ["/bin/true"]
+    restart: "no"
+
+  manager:
+    image: ${MANAGER_IMAGE:-ghcr.io/peervw/easy-runners-manager:latest}
+    depends_on:
+      runner-image:
+        condition: service_completed_successfully
+    env_file:
+      - path: .env
+        required: false
+    environment:
+      MANAGER_PORT: "8080"
+      CONFIG_PATH: /app/config.yaml
+      DATA_DIR: /data
+      DOCKER_HOST: unix:///var/run/docker.sock
+      DOCKER_SOCKET_PATH: /var/run/docker.sock
+      RUNNER_NETWORK: easy-runners
+      RUNNER_IMAGE: ${RUNNER_IMAGE:-ghcr.io/peervw/easy-runners-runner:latest}
+    ports:
+      - "${MANAGER_BIND_ADDRESS:-127.0.0.1}:${MANAGER_PORT:-8080}:8080"
+    volumes:
+      - /var/run/docker.sock:/var/run/docker.sock
+      - easy-runners-data:/data
+      - ./config.yaml:/app/config.yaml:ro
+      - ./secrets:/run/secrets:ro
+    networks:
+      - easy-runners
+    read_only: true
+    tmpfs:
+      - /tmp:size=64m,mode=1777
+    cap_drop: [ALL]
+    security_opt:
+      - no-new-privileges:true
+    restart: unless-stopped
+
+volumes:
+  easy-runners-data:
+
+networks:
+  easy-runners:
+    name: easy-runners

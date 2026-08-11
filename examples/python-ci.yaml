@@ -1,0 +1,14 @@
+name: Python CI
+on:
+  push:
+  pull_request:
+
+jobs:
+  test:
+    runs-on: [self-hosted, linux, x64, docker]
+    steps:
+      - uses: actions/checkout@v4
+      - uses: astral-sh/setup-uv@v6
+      - run: uv sync --frozen
+      - run: uv run pytest
+

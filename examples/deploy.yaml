@@ -1,0 +1,11 @@
+name: Deploy
+on:
+  workflow_dispatch:
+
+jobs:
+  production:
+    runs-on: [self-hosted, linux, x64, deploy]
+    environment: production
+    steps:
+      - uses: actions/checkout@v4
+      - run: ./scripts/deploy.sh

@@ -1,0 +1,317 @@
+# EasyRunners
+
+EasyRunners is a small, self-hosted control plane for **ephemeral official GitHub Actions
+runners**. It runs on an ordinary Linux Docker host—no Kubernetes, database server, queue, or fake
+CI engine. GitHub remains responsible for workflows, scheduling, logs, secrets, and job results;
+EasyRunners supplies fresh Docker runner capacity and removes it after one job.
+
+## How it works
+
+```text
+workflow_job queued webhook        periodic REST reconciliation
+              │                                  │
+              └──────────────┬───────────────────┘
+                             ▼
+                    per-pool scheduler
+                             │
+            short-lived registration token from GitHub
+                             │
+                             ▼
+       official actions/runner container --ephemeral
+                             │
+                 exactly one GitHub Actions job
+                             │
+                             ▼
+          automatic de-registration + container removal
+```
+
+Every runner receives a new container filesystem and `_work` directory. Runner registration tokens
+are requested just in time, never stored, and never written to logs. Containers are labeled so the
+manager can adopt or clean them after a restart. See [the architecture decision](docs/ARCHITECTURE.md).
+
+## Requirements
+
+- x86_64 or ARM64 Ubuntu, or another modern Linux distribution
+- Docker Engine and Docker Compose v2
+- A browser-reachable HTTPS URL (public for webhooks, private/LAN is fine for polling-only mode)
+- A trusted GitHub repository or organization
+
+Downloading and configuring GitHub's runner means accepting the applicable
+[GitHub Customer Agreement](https://github.com/customer-terms).
+
+## Quick start
+
+```bash
+git clone <this-repository-url> easy-runners
+cd easy-runners
+cp .env.example .env
+```
+
+Set at least this value in `.env`:
+
+```env
+PUBLIC_URL=https://runners.example.com
+```
+
+For the easiest install, use the published multi-architecture images:
+
+```bash
+docker compose -f compose.prebuilt.yaml up -d
+docker compose logs manager
+```
+
+Until images have been published for your fork or registry, build them locally:
+
+```bash
+docker compose up -d --build
+docker compose logs manager
+```
+
+Make the GHCR packages public for passwordless installs; private packages require signing in to
+`ghcr.io` with Docker before the prebuilt command.
+
+The first boot prints an `auth.bootstrap_password` JSON event exactly once. Open `PUBLIC_URL`, sign
+in with that password, and replace it with a password of at least 14 characters. Paste a repository
+URL such as `https://github.com/peervw/prediction-market`, then select **Connect GitHub**:
+
+1. EasyRunners detects the owner, repository, and account type from the URL.
+2. Optionally select organization-wide operation and webhook or polling-only scaling.
+3. GitHub creates the preconfigured private App and asks where to install it.
+4. Select only the repositories that should use these runners.
+5. Return to the readiness checklist and click **Test a runner**.
+
+If login expires or the browser is closed during setup, sign in again and use **Continue GitHub
+installation**. **Start over** clears the local connection; remove an abandoned App separately in
+GitHub settings if desired.
+
+EasyRunners stores the generated App private key and webhook secret in the `easy-runners-data`
+volume with mode `0600`. It verifies that GitHub's returned installation belongs to the configured
+target before accepting it.
+
+The manager binds `127.0.0.1:8080` by default. Dokploy/Portainer deployments can route to the
+`manager` service on port 8080 through the Compose network. For a host reverse proxy, proxy to
+`http://127.0.0.1:8080`. Do not expose port 8080 directly to the internet without HTTPS.
+
+### Private or LAN installation
+
+Turn off **Instant scaling with a public HTTPS webhook** during onboarding, or set
+`WEBHOOK_ENABLED=false`. GitHub does not need inbound network access to the manager; queued jobs are
+discovered through periodic REST polling. Scale-up can therefore take up to
+`QUEUE_POLL_INTERVAL` seconds. `PUBLIC_URL` remains canonical and is never inferred from request
+headers.
+
+### Password recovery
+
+```bash
+docker compose exec manager easyrunners admin reset-password
+```
+
+The command invalidates all sessions and prints a new one-time password.
+
+## GitHub permissions
+
+The manifest requests only the permissions required by the selected scope:
+
+| Scope | GitHub App permission | Why |
+|---|---|---|
+| Repository | Actions: read | Receive `workflow_job` and reconcile workflow jobs |
+| Repository | Administration: write | Create/list/delete self-hosted runner registrations |
+| Organization | Actions: read | Observe jobs in installed repositories |
+| Organization | Self-hosted runners: write | Create/list/delete organization runners |
+
+The App subscribes only to `workflow_job`. GitHub's registration token expires after one hour;
+EasyRunners obtains a fresh one for every container. Organization owners should use GitHub runner
+groups and selected-repository policies to restrict access.
+
+### Manual GitHub App or PAT setup
+
+For headless installations set `GITHUB_AUTH_MODE=app` and provide `GITHUB_SCOPE`, target fields,
+`GITHUB_APP_ID`, `GITHUB_INSTALLATION_ID`, and `GITHUB_APP_PRIVATE_KEY_PATH`. Mount the PEM into the
+manager container if it is not in `/data`.
+
+For development only, set `GITHUB_AUTH_MODE=pat` and `GITHUB_TOKEN`. Classic PATs require `repo` for
+private repositories or `admin:org` for organization runners. GitHub Apps are recommended because
+their installation tokens are short-lived and repository access is explicit.
+
+## Runner pools and labels
+
+Normal settings live in `config.yaml`; secrets remain in the environment or protected data volume.
+Pools can also be added and edited in the dashboard or imported/exported as YAML. Dashboard
+overrides persist in `/data` and take precedence after restart. A pool is an independently bounded
+capacity class:
+
+```yaml
+runner_pools:
+  default:
+    labels: [self-hosted, linux, x64, docker]
+    min: 0
+    max: 5
+    cpu: 4
+    memory: 8g
+    job_timeout: 3600
+    max_lifetime: 3900
+    docker_mode: socket
+
+  deploy:
+    labels: [self-hosted, linux, x64, deploy]
+    min: 0
+    max: 1
+    priority: 10
+    cpu: 2
+    memory: 4g
+    docker_mode: none
+    environment_from: [DEPLOY_TOKEN]
+```
+
+GitHub automatically assigns `self-hosted`, `Linux`, and `X64`; EasyRunners passes custom labels to
+`config.sh`. Matching is case-insensitive. When multiple pools match, the pool with the fewest extra
+labels wins, followed by highest priority and pool name. Duplicate label sets are rejected at
+startup. Give sensitive pools a unique discriminator such as `deploy`.
+
+Use a pool with:
+
+```yaml
+runs-on: [self-hosted, linux, x64, docker]
+```
+
+See [Python CI](examples/python-ci.yaml), [GHCR build](examples/docker-ghcr.yaml), and
+[deployment](examples/deploy.yaml) examples. The dashboard generator creates equivalent
+copy-paste-ready workflows for Python, Node, Docker, and isolated deploy pools.
+
+### Scaling behavior
+
+- `workflow_job` webhooks trigger immediate reconciliation.
+- Repository-scoped REST polling repairs missed events and restores demand after restart.
+- Organization polling enumerates App installation repositories because GitHub has no single API
+  endpoint for all queued organization jobs grouped by runner labels.
+- Starting containers count toward capacity. Busy runners are never stopped for ordinary scale-down.
+- Idle excess waits for `idle_timeout` and an assignment grace period.
+- Dashboard pre-warming is a temporary desired-capacity floor, not a permanent config change.
+- Exactly one manager replica is supported.
+
+## Docker builds and security
+
+`docker_mode: socket` mounts `/var/run/docker.sock` and supplies Docker CLI in the runner image. This
+is convenient for Docker builds, but **Docker socket access is root-equivalent access to the host**.
+A workflow can inspect containers, mount host paths, and read manager secrets. Filesystem isolation
+between jobs does not mitigate a malicious workflow.
+
+Therefore:
+
+1. Never run arbitrary or unreviewed fork pull-request code on these runners.
+2. Restrict organization runners to trusted repositories and workflows.
+3. Keep generic CI and production deployment in different pools and preferably on different hosts.
+4. Expose deployment credentials only through the deploy pool.
+5. Use `docker_mode: none` when jobs do not need Docker.
+6. For hostile multi-tenant workloads, use separate VMs or ARC/scale sets rather than this socket
+   architecture. Privileged Docker-in-Docker is deliberately not implemented in v1.
+
+Runner containers are otherwise non-privileged, drop capabilities, set `no-new-privileges`, have no
+published ports, run as UID/GID 1001, and receive configurable CPU, memory, PID, job, and lifetime
+limits. Pool-defined host mounts deliberately weaken isolation and must be reviewed.
+
+## Dashboard, API, and metrics
+
+All management data is authenticated. Browser mutations also require CSRF validation. Create
+revocable API tokens from the dashboard and send:
+
+```text
+Authorization: Bearer ert_...
+```
+
+Endpoints:
+
+- `GET /health` — intentionally minimal unauthenticated liveness
+- `GET /api/status`, `/api/runners`, `/api/pools`, `/api/history`
+- `GET /api/readiness`, `/api/version`, and `/api/pools/{pool}/workflow`
+- `GET /api/jobs` for queued and in-progress workflow jobs
+- `PUT|DELETE /api/pools/{pool}` and YAML pool import/export endpoints
+- `POST /api/pools/{pool}/scale` with `{"desired": 2, "ttl_seconds": 600}`
+- `POST /api/readiness/test-runner` to pre-warm one runner for five minutes
+- `POST /api/reconcile`
+- `GET|POST /api/auth/tokens` and `DELETE /api/auth/tokens/{id}`
+- `GET /api/github`, setup/disconnect routes
+- `POST /webhooks/github` — HMAC-SHA256 signed GitHub deliveries only
+- `GET /metrics` — Prometheus format, requiring session or bearer token
+
+Structured events include `runner.created`, `runner.online`, `runner.job_started`,
+`runner.job_finished`, `runner.removed`, `github.api_error`, and `scheduler.reconcile`. Diagnostic
+archives are retained under `/data/runner-logs` for seven days by default. Treat them as sensitive.
+
+## Updating
+
+The dashboard compares the pinned runner version with GitHub's latest release and shows when they
+differ. It deliberately does not update automatically because runner releases use a progressive
+rollout.
+
+Prebuilt-image update:
+
+```bash
+docker compose -f compose.prebuilt.yaml pull
+docker compose -f compose.prebuilt.yaml up -d
+```
+
+Source-build update:
+
+```bash
+git pull --ff-only
+docker compose up -d --build
+```
+
+The runner is pinned and built with automatic updates disabled to avoid downloading an update for
+every ephemeral container. To update it, change `RUNNER_VERSION`, `RUNNER_SHA256_X64`, and
+`RUNNER_SHA256_ARM64` in `.env` using the checksums published on the official
+[actions/runner releases page](https://github.com/actions/runner/releases), then rebuild. GitHub uses
+a progressive rollout, so verify the expected version in the repository or organization's **Add new
+self-hosted runner** page before updating.
+
+Tag pushes run `.github/workflows/release-images.yml`, producing amd64/arm64 manager and runner
+images in GHCR with SBOMs, provenance attestations, and keyless Cosign signatures. Change the image
+namespace in `compose.prebuilt.yaml` when publishing from a fork. That workflow must run once before
+the prebuilt path exists in a new registry.
+
+## Backup and restore
+
+Runner containers and workspaces require no backup. Back up the named data volume to retain the App
+private key, webhook secret, administrator hash, API tokens, and history:
+
+```bash
+docker run --rm -v easy-runners_easy-runners-data:/data:ro \
+  -v "$PWD":/backup ubuntu:24.04 \
+  tar czf /backup/easy-runners-data.tgz -C /data .
+```
+
+Restore only while the manager is stopped. Protect backups as authentication secrets. If the volume
+is lost, create a new App through onboarding or supply manual credentials; runner capacity itself is
+reconstructed from Docker and GitHub. Rotate App private keys in GitHub and replace the stored PEM
+after any suspected disclosure.
+
+## Troubleshooting
+
+- **No runner appears with min 0:** queue a job whose complete `runs-on` labels match a pool, or
+  pre-warm one runner from the dashboard.
+- **Job stays queued:** compare job labels with the effective pool labels and verify the repository
+  is included in the App installation/runner group.
+- **GitHub disconnected:** inspect `docker compose logs manager` for permission or installation-token
+  errors. Reapprove changed App permissions in GitHub.
+- **Webhook rejected:** ensure `PUBLIC_URL` reaches `/webhooks/github` unchanged and the reverse proxy
+  does not rewrite the request body.
+- **Docker unavailable:** verify the socket mount, Docker daemon, and `DOCKER_HOST`.
+- **Runner registers then exits:** inspect `/data/runner-logs` and verify the pinned runner version is
+  accepted by GitHub.
+- **Organization polling is slow:** rely on webhooks for fast scaling, increase the full sweep
+  interval, or reduce the App's installed repository selection.
+
+Development commands:
+
+```bash
+uv sync --all-groups
+ALLOW_INSECURE_PUBLIC_URL=true DATA_DIR=./data uv run easyrunners serve
+uv run pytest
+uv run ruff check .
+uv run mypy src
+```
+
+## License
+
+Apache-2.0. The GitHub Actions runner is downloaded separately and governed by GitHub's terms.

@@ -1,0 +1,262 @@
+const csrf = document.querySelector('meta[name="csrf-token"]')?.content || '';
+const headers = {'Content-Type': 'application/json', 'X-CSRF-Token': csrf};
+const esc = value => String(value ?? '').replace(
+  /[&<>'"]/g,
+  character => ({'&': '&amp;', '<': '&lt;', '>': '&gt;', "'": '&#39;', '"': '&quot;'}[character]),
+);
+let poolConfigs = {};
+let refreshing = false;
+
+function toast(message, kind = 'error') {
+  const item = document.createElement('div');
+  item.className = `toast ${kind}`;
+  item.textContent = message;
+  document.querySelector('#toasts')?.appendChild(item);
+  setTimeout(() => item.remove(), 6000);
+}
+
+function duration(seconds) {
+  seconds = Math.max(0, Number(seconds) || 0);
+  const hours = Math.floor(seconds / 3600);
+  const minutes = Math.floor((seconds % 3600) / 60);
+  return hours ? `${hours}h ${minutes}m` : `${minutes}m`;
+}
+
+async function json(url, options = {}) {
+  const response = await fetch(url, options);
+  if (response.status === 401) {
+    window.location.assign(`/auth/login?next=${encodeURIComponent(window.location.pathname)}`);
+    throw new Error('Your session expired. Sign in to continue.');
+  }
+  if (!response.ok) {
+    const error = await response.json().catch(() => ({detail: response.statusText}));
+    const detail = typeof error.detail === 'string' ? error.detail : JSON.stringify(error.detail);
+    throw new Error(detail || 'Request failed');
+  }
+  return response.status === 204 ? null : response.json();
+}
+
+async function action(work, success) {
+  try {
+    const result = await work();
+    if (success) toast(success, 'success');
+    return result;
+  } catch (error) {
+    toast(error.message || String(error));
+    return null;
+  }
+}
+
+function renderReadiness(readiness) {
+  const badge = document.querySelector('#readiness-badge');
+  badge.textContent = readiness.ready ? 'Ready' : 'Needs attention';
+  badge.className = `badge ${readiness.ready ? 'online' : 'offline'}`;
+  document.querySelector('#readiness').innerHTML = Object.entries(readiness.checks).map(([name, check]) => {
+    const detail = typeof check.detail === 'object'
+      ? Object.entries(check.detail).map(([pool, ok]) => `${pool}: ${ok ? 'found' : 'missing'}`).join(', ')
+      : (check.detail || 'Not observed yet');
+    const ok = check.ok || check.optional;
+    return `<div class="check-item ${ok ? 'ok' : 'bad'}"><strong>${check.ok ? '✓' : (check.optional ? '○' : '✕')} ${esc(name.replaceAll('_', ' '))}</strong><p class="muted">${esc(detail)}</p></div>`;
+  }).join('');
+}
+
+async function refresh() {
+  if (refreshing) return;
+  refreshing = true;
+  try {
+    const [status, runners, jobs, history, tokens, github, readiness, versions] = await Promise.all([
+      json('/api/status'),
+      json('/api/runners'),
+      json('/api/jobs'),
+      json('/api/history?limit=50'),
+      json('/api/auth/tokens'),
+      json('/api/github'),
+      json('/api/readiness'),
+      json('/api/version'),
+    ]);
+    const badge = document.querySelector('#github-badge');
+    const githubState = github.installed ? status.github : (github.configured ? 'installation pending' : 'not configured');
+    badge.textContent = githubState;
+    badge.className = `badge ${status.github === 'connected' ? 'online' : 'offline'}`;
+    document.querySelector('#connection-details').innerHTML = github.connection
+      ? `<strong>${esc(github.connection.scope)} · ${esc(status.target || github.connection.owner)}</strong>`
+        + `<p class="muted">App: ${esc(github.connection.app_slug || 'manual')} · Installation: ${esc(github.connection.installation_id || 'pending')} · ${github.connection.webhook_enabled ? 'webhook + polling' : 'polling only'}</p>`
+      : '<p class="muted">Paste one GitHub URL below. EasyRunners detects the scope and account type.</p>';
+    document.querySelector('#updated').textContent = status.last_reconcile
+      ? `Updated ${new Date(status.last_reconcile).toLocaleTimeString()}`
+      : '';
+    document.querySelector('#version').textContent = versions.update_available
+      ? `Runner ${versions.runner} · ${versions.latest_runner} available`
+      : `EasyRunners ${versions.manager} · Runner ${versions.runner}`;
+    renderReadiness(readiness);
+
+    poolConfigs = Object.fromEntries(Object.entries(status.pools).map(([name, pool]) => [name, pool.config]));
+    document.querySelector('#pools').innerHTML = Object.entries(status.pools).map(([name, pool]) => `
+      <article class="card">
+        <div class="section-heading"><h2>${esc(name)}</h2><span>${pool.min}–${pool.max}</span></div>
+        <div class="stats">
+          <div class="stat"><b>${pool.queued}</b><span>Queued</span></div>
+          <div class="stat"><b>${pool.starting}</b><span>Starting</span></div>
+          <div class="stat"><b>${pool.idle}</b><span>Idle</span></div>
+          <div class="stat"><b>${pool.busy}</b><span>Busy</span></div>
+        </div>
+        <div class="labels">${pool.labels.map(label => `<span class="label">${esc(label)}</span>`).join('')}</div>
+        <form class="scale-form inline-form" data-pool="${esc(name)}">
+          <input name="desired" type="number" min="0" max="${pool.max}" value="${pool.manual_floor || 0}" aria-label="Desired pre-warm">
+          <input name="ttl" type="number" min="30" value="600" aria-label="TTL seconds">
+          <button>Pre-warm</button>
+        </form>
+        <div class="actions"><button class="secondary compact edit-pool" data-pool="${esc(name)}">Edit</button><button class="secondary compact delete-pool" data-pool="${esc(name)}">Delete</button></div>
+      </article>`).join('');
+
+    const workflowPool = document.querySelector('#workflow-pool');
+    const selectedPool = workflowPool.value;
+    workflowPool.innerHTML = Object.keys(status.pools).map(name => `<option value="${esc(name)}">${esc(name)}</option>`).join('');
+    if (status.pools[selectedPool]) workflowPool.value = selectedPool;
+
+    document.querySelector('#runner-count').textContent = runners.length;
+    document.querySelector('#runners').innerHTML = runners.length
+      ? runners.map(runner => `<tr><td>${esc(runner.name)}</td><td>${esc(runner.pool)}</td><td><span class="badge ${esc(runner.state)}">${esc(runner.state)}</span></td><td>${duration(runner.uptime_seconds)}</td><td><code>${esc(runner.container_id.slice(0, 12))}</code></td><td>${runner.labels.map(label => `<span class="label">${esc(label)}</span>`).join(' ')}</td></tr>`).join('')
+      : '<tr><td colspan="6" class="muted">No managed runners.</td></tr>';
+    document.querySelector('#job-count').textContent = jobs.length;
+    document.querySelector('#jobs').innerHTML = jobs.length
+      ? jobs.map(job => `<tr><td>${esc(job.name || job.id)}</td><td>${esc(job.repository)}</td><td>${esc(job.pool || '—')}</td><td><span class="badge ${esc(job.status)}">${esc(job.status)}</span></td><td>${esc(job.runner_name || '—')}</td><td>${job.queued_at ? new Date(job.queued_at).toLocaleString() : '—'}</td></tr>`).join('')
+      : '<tr><td colspan="6" class="muted">No queued or active jobs.</td></tr>';
+    document.querySelector('#history').innerHTML = history.length
+      ? history.map(job => `<tr><td>${esc(job.name || job.id)}</td><td>${esc(job.repository)}</td><td>${esc(job.pool || '—')}</td><td>${esc(job.conclusion || '—')}</td><td>${job.completed_at ? new Date(job.completed_at).toLocaleString() : '—'}</td></tr>`).join('')
+      : '<tr><td colspan="5" class="muted">No completed jobs observed.</td></tr>';
+    document.querySelector('#tokens').innerHTML = tokens.map(token => `<li><span>${esc(token.name)} <small class="muted">${esc(token.id)}</small></span><button class="secondary compact revoke-token" data-id="${esc(token.id)}">Revoke</button></li>`).join('');
+    bindDynamic();
+  } catch (error) {
+    toast(`Dashboard refresh failed: ${error.message || error}`);
+  } finally {
+    refreshing = false;
+  }
+}
+
+function fillPool(name = 'default', config = null) {
+  const form = document.querySelector('#pool-form');
+  const value = config || {labels: ['self-hosted', 'linux', 'x64', name], min: 0, max: 5, cpu: 4, memory: '8g', docker_mode: 'socket'};
+  form.pool_name.value = name;
+  form.labels.value = value.labels.join(',');
+  form.min.value = value.min;
+  form.max.value = value.max;
+  form.cpu.value = value.cpu;
+  form.memory.value = value.memory;
+  form.docker_mode.value = value.docker_mode;
+  form.scrollIntoView({behavior: 'smooth', block: 'center'});
+}
+
+function bindDynamic() {
+  document.querySelectorAll('.scale-form').forEach(form => {
+    form.onsubmit = async event => {
+      event.preventDefault();
+      const result = await action(() => json(`/api/pools/${encodeURIComponent(form.dataset.pool)}/scale`, {
+        method: 'POST', headers, body: JSON.stringify({desired: Number(form.desired.value), ttl_seconds: Number(form.ttl.value)}),
+      }), 'Pre-warm request applied.');
+      if (result) refresh();
+    };
+  });
+  document.querySelectorAll('.revoke-token').forEach(button => {
+    button.onclick = async () => {
+      const result = await action(() => json(`/api/auth/tokens/${encodeURIComponent(button.dataset.id)}`, {method: 'DELETE', headers}), 'Token revoked.');
+      if (result !== null) refresh(); else refresh();
+    };
+  });
+  document.querySelectorAll('.edit-pool').forEach(button => {
+    button.onclick = () => fillPool(button.dataset.pool, poolConfigs[button.dataset.pool]);
+  });
+  document.querySelectorAll('.delete-pool').forEach(button => {
+    button.onclick = async () => {
+      if (!window.confirm(`Delete runner pool “${button.dataset.pool}”?`)) return;
+      await action(() => json(`/api/pools/${encodeURIComponent(button.dataset.pool)}`, {method: 'DELETE', headers}), 'Pool deleted.');
+      refresh();
+    };
+  });
+}
+
+document.querySelector('#reconcile')?.addEventListener('click', async () => {
+  await action(() => json('/api/reconcile', {method: 'POST', headers}), 'Reconciliation completed.');
+  refresh();
+});
+document.querySelector('#test-runner')?.addEventListener('click', async () => {
+  await action(() => json('/api/readiness/test-runner', {method: 'POST', headers}), 'Test runner requested. Watch the runner list.');
+  refresh();
+});
+document.querySelector('#disconnect-github')?.addEventListener('click', async () => {
+  if (!window.confirm('Disconnect this GitHub App from EasyRunners? The App remains installed on GitHub.')) return;
+  await action(() => json('/api/github/disconnect', {method: 'POST', headers}), 'GitHub disconnected locally.');
+  window.location.reload();
+});
+document.querySelector('#token-form')?.addEventListener('submit', async event => {
+  event.preventDefault();
+  const result = await action(() => json('/api/auth/tokens', {method: 'POST', headers, body: JSON.stringify({name: event.target.name.value})}));
+  if (!result) return;
+  document.querySelector('#new-token').innerHTML = `Copy this token now; it will not be shown again: <code>${esc(result.token)}</code>`;
+  event.target.reset();
+  refresh();
+});
+document.querySelector('#github-setup')?.addEventListener('submit', async event => {
+  event.preventDefault();
+  const progress = document.querySelector('#setup-progress');
+  progress.textContent = 'Checking GitHub target…';
+  const data = new FormData(event.target);
+  const result = await action(() => json('/api/github/setup/manifest', {
+    method: 'POST', headers, body: JSON.stringify({
+      target_url: data.get('target_url'),
+      organization_wide: data.get('organization_wide') === 'on',
+      webhook_enabled: data.get('webhook_enabled') === 'on',
+    }),
+  }));
+  if (!result) { progress.textContent = ''; return; }
+  progress.textContent = 'Opening GitHub…';
+  const form = document.createElement('form');
+  form.method = 'post'; form.action = result.action;
+  const manifest = document.createElement('input');
+  manifest.type = 'hidden'; manifest.name = 'manifest'; manifest.value = JSON.stringify(result.manifest);
+  form.appendChild(manifest); document.body.appendChild(form); form.submit();
+});
+document.querySelector('#pool-form')?.addEventListener('submit', async event => {
+  event.preventDefault();
+  const form = event.target;
+  const name = form.pool_name.value;
+  const current = poolConfigs[name] || {};
+  const body = {...current,
+    labels: form.labels.value.split(',').map(value => value.trim()).filter(Boolean),
+    min: Number(form.min.value), max: Number(form.max.value), cpu: Number(form.cpu.value),
+    memory: form.memory.value, docker_mode: form.docker_mode.value,
+  };
+  const result = await action(() => json(`/api/pools/${encodeURIComponent(name)}`, {method: 'PUT', headers, body: JSON.stringify(body)}), 'Pool saved.');
+  if (result) refresh();
+});
+document.querySelector('#new-pool')?.addEventListener('click', () => fillPool('new-pool'));
+document.querySelector('#export-pools')?.addEventListener('click', async () => {
+  await action(async () => {
+    const response = await fetch('/api/pools/config.yaml');
+    if (!response.ok) throw new Error('Could not export pools');
+    document.querySelector('#pool-yaml').value = await response.text();
+  }, 'Pool YAML exported below.');
+});
+document.querySelector('#import-pools')?.addEventListener('click', async () => {
+  const source = document.querySelector('#pool-yaml').value;
+  const result = await action(() => json('/api/pools/config', {method: 'PUT', headers, body: JSON.stringify({yaml: source})}), 'Pool YAML imported.');
+  if (result) refresh();
+});
+document.querySelector('#workflow-form')?.addEventListener('submit', async event => {
+  event.preventDefault();
+  const form = event.target;
+  const result = await action(() => json(`/api/pools/${encodeURIComponent(form.pool.value)}/workflow?template=${encodeURIComponent(form.template.value)}`));
+  if (!result) return;
+  document.querySelector('#workflow-yaml').value = result.yaml;
+  const link = document.querySelector('#create-workflow-link');
+  link.classList.toggle('hidden', !result.create_url);
+  if (result.create_url) link.href = result.create_url;
+});
+document.querySelector('#copy-workflow')?.addEventListener('click', async () => {
+  const content = document.querySelector('#workflow-yaml').value;
+  if (!content) { toast('Generate a workflow first.'); return; }
+  await action(() => navigator.clipboard.writeText(content), 'Workflow copied.');
+});
+
+refresh();
+setInterval(refresh, 5000);

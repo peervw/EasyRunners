@@ -1,0 +1,34 @@
+manager:
+  reconcile_interval: 10
+  queue_poll_interval: 60
+  full_poll_interval: 300
+  poll_concurrency: 5
+  history_limit: 500
+  runner_log_retention_days: 7
+
+runner_pools:
+  default:
+    labels: [self-hosted, linux, x64, docker]
+    min: 0
+    max: 5
+    priority: 0
+    image: easy-runners-runner:latest
+    cpu: 4
+    memory: 8g
+    pids_limit: 1024
+    idle_timeout: 60
+    job_timeout: 3600
+    max_lifetime: 3900
+    docker_mode: socket
+
+  # Keep deploy credentials and mounts out of the default CI pool.
+  # deploy:
+  #   labels: [self-hosted, linux, x64, deploy]
+  #   min: 0
+  #   max: 1
+  #   priority: 10
+  #   cpu: 2
+  #   memory: 4g
+  #   docker_mode: none
+  #   environment_from: [DEPLOY_TOKEN]
+

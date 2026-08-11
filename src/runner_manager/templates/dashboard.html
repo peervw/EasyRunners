@@ -1,0 +1,106 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8">
+    <meta name="viewport" content="width=device-width,initial-scale=1">
+    <meta name="csrf-token" content="{{ csrf }}">
+    <title>EasyRunners</title>
+    <link rel="stylesheet" href="/static/app.css">
+    <link rel="stylesheet" href="/static/easy.css">
+    <script src="/static/app.js" defer></script>
+  </head>
+  <body>
+    <header>
+      <div><span class="brand-mark small">ER</span><strong>EasyRunners</strong></div>
+      <form method="post" action="/auth/logout">
+        <input type="hidden" name="csrf_token" value="{{ csrf }}">
+        <button class="secondary compact">Sign out</button>
+      </form>
+    </header>
+    <main>
+      {% if must_change %}
+      <section class="panel warning-panel">
+        <h2>Change the bootstrap password</h2>
+        <p>The generated password is only for initial access. Change it before connecting GitHub.</p>
+        <form class="inline-form" method="post" action="/auth/password">
+          <input type="hidden" name="csrf_token" value="{{ csrf }}">
+          <input name="current_password" type="password" placeholder="Current password" required>
+          <input name="new_password" type="password" minlength="14" placeholder="New password (14+ characters)" required>
+          <button>Change password</button>
+        </form>
+      </section>
+      {% endif %}
+
+      <section class="hero">
+        <div><p class="eyebrow">CONTROL PLANE</p><h1>Runner capacity</h1></div>
+        <div class="actions"><span id="version" class="muted"></span><button id="reconcile">Reconcile now</button></div>
+      </section>
+
+      <section id="connection" class="panel">
+        <div class="section-heading"><h2>GitHub connection</h2><span id="github-badge" class="badge">Loading</span></div>
+        <div id="connection-details"></div>
+        {% if connection and not connection.installation_id and connection.app_slug %}
+        <div class="actions">
+          <a class="button-link" href="/setup/github/resume">Continue GitHub installation</a>
+          <button id="disconnect-github" class="secondary">Start over</button>
+        </div>
+        {% elif connection and connection.installation_id %}
+        <div class="actions">
+          <button id="test-runner">Test a runner</button>
+          <button id="disconnect-github" class="secondary">Disconnect locally</button>
+        </div>
+        {% endif %}
+        {% if not connection and not must_change %}
+        <form id="github-setup" class="setup-grid">
+          <label class="wide">GitHub repository or organization URL<input name="target_url" placeholder="https://github.com/owner/repository" required></label>
+          <label class="check-label"><input name="organization_wide" type="checkbox"> Use all selected repositories in this organization</label>
+          <label class="check-label"><input name="webhook_enabled" type="checkbox" {% if webhook_enabled %}checked{% endif %}> Instant scaling with a public HTTPS webhook</label>
+          <p class="muted wide">Turn off instant scaling for a private/LAN install. EasyRunners will poll GitHub instead.</p>
+          <button type="submit">Connect GitHub</button><span id="setup-progress" class="muted"></span>
+        </form>
+        {% endif %}
+      </section>
+
+      <section class="panel">
+        <div class="section-heading"><h2>Ready to run?</h2><span id="readiness-badge" class="badge">Checking</span></div>
+        <div id="readiness" class="check-list"></div>
+        <p class="muted">The webhook check is informational: polling-only installations can be fully ready without it.</p>
+      </section>
+
+      <section><div class="section-heading"><h2>Runner pools</h2><span id="updated" class="muted"></span></div><div id="pools" class="card-grid"></div></section>
+      <section class="panel">
+        <div class="section-heading"><h2>Add or edit a pool</h2><button id="new-pool" class="secondary compact">New</button></div>
+        <form id="pool-form" class="setup-grid">
+          <label>Name<input name="pool_name" value="default" pattern="[A-Za-z0-9_.-]+" required></label>
+          <label>Labels<input name="labels" value="self-hosted,linux,x64,docker" required></label>
+          <label>Minimum<input name="min" type="number" min="0" value="0" required></label>
+          <label>Maximum<input name="max" type="number" min="0" value="5" required></label>
+          <label>CPU cores<input name="cpu" type="number" min="0.1" step="0.1" value="4" required></label>
+          <label>Memory<input name="memory" value="8g" required></label>
+          <label>Docker access<select name="docker_mode"><option value="socket">Docker socket</option><option value="none">No Docker</option></select></label>
+          <button>Save pool</button>
+        </form>
+        <details>
+          <summary>YAML import / export</summary>
+          <textarea id="pool-yaml" class="code-editor" spellcheck="false"></textarea>
+          <div class="actions"><button id="export-pools" class="secondary">Export current</button><button id="import-pools">Import and replace</button></div>
+        </details>
+      </section>
+      <section class="panel">
+        <div class="section-heading"><h2>Create a workflow</h2><span class="muted">Copy-paste ready</span></div>
+        <form id="workflow-form" class="inline-form">
+          <select name="pool" id="workflow-pool"></select>
+          <select name="template"><option value="python">Python CI</option><option value="node">Node CI</option><option value="docker">Docker build</option><option value="deploy">Deploy</option></select>
+          <button>Generate</button>
+        </form>
+        <textarea id="workflow-yaml" class="code-editor" readonly spellcheck="false" placeholder="Choose a pool and generate a workflow."></textarea>
+        <div class="actions"><button id="copy-workflow" class="secondary">Copy YAML</button><a id="create-workflow-link" class="button-link hidden" target="_blank" rel="noopener">Open GitHub Actions</a></div>
+      </section>
+      <section class="panel"><div class="section-heading"><h2>Active runners</h2><span id="runner-count" class="badge">0</span></div><div class="table-wrap"><table><thead><tr><th>Runner</th><th>Pool</th><th>State</th><th>Uptime</th><th>Container</th><th>Labels</th></tr></thead><tbody id="runners"></tbody></table></div></section>
+      <section class="panel"><div class="section-heading"><h2>Queued and active jobs</h2><span id="job-count" class="badge">0</span></div><div class="table-wrap"><table><thead><tr><th>Job</th><th>Repository</th><th>Pool</th><th>Status</th><th>Runner</th><th>Queued</th></tr></thead><tbody id="jobs"></tbody></table></div></section>
+      <section class="panel"><div class="section-heading"><h2>Recent jobs</h2></div><div class="table-wrap"><table><thead><tr><th>Job</th><th>Repository</th><th>Pool</th><th>Conclusion</th><th>Completed</th></tr></thead><tbody id="history"></tbody></table></div></section>
+      <section class="panel"><div class="section-heading"><h2>API tokens</h2></div><form id="token-form" class="inline-form"><input name="name" placeholder="Token name" required><button>Create token</button></form><div id="new-token"></div><ul id="tokens" class="token-list"></ul></section>
+    </main>
+    <div id="toasts" class="toast-area" aria-live="polite"></div>
+  </body>
+</html>

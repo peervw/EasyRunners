@@ -1,0 +1,58 @@
+name: easy-runners
+
+services:
+  runner-image:
+    image: ${RUNNER_IMAGE:-easy-runners-runner:latest}
+    build:
+      context: .
+      dockerfile: runner/Dockerfile
+      args:
+        RUNNER_VERSION: ${RUNNER_VERSION:-2.336.0}
+        RUNNER_SHA256_X64: ${RUNNER_SHA256_X64:-04cf0be1aff4c3ec3554466c39124ca250e3effd8873bb7e8d68535aa9505d5d}
+        RUNNER_SHA256_ARM64: ${RUNNER_SHA256_ARM64:-58b758e420b87093fbd4bfddd368074960053e2f1388f01848c82624b90f27d1}
+    entrypoint: ["/bin/true"]
+    restart: "no"
+
+  manager:
+    image: ${MANAGER_IMAGE:-easy-runners-manager:latest}
+    build:
+      context: .
+      dockerfile: Dockerfile
+      target: manager
+    depends_on:
+      runner-image:
+        condition: service_completed_successfully
+    env_file:
+      - path: .env
+        required: false
+    environment:
+      MANAGER_PORT: "8080"
+      CONFIG_PATH: /app/config.yaml
+      DATA_DIR: /data
+      DOCKER_HOST: unix:///var/run/docker.sock
+      DOCKER_SOCKET_PATH: /var/run/docker.sock
+      RUNNER_NETWORK: easy-runners
+      RUNNER_IMAGE: ${RUNNER_IMAGE:-easy-runners-runner:latest}
+    ports:
+      - "${MANAGER_BIND_ADDRESS:-127.0.0.1}:${MANAGER_PORT:-8080}:8080"
+    volumes:
+      - /var/run/docker.sock:/var/run/docker.sock
+      - easy-runners-data:/data
+      - ./config.yaml:/app/config.yaml:ro
+      - ./secrets:/run/secrets:ro
+    networks:
+      - easy-runners
+    read_only: true
+    tmpfs:
+      - /tmp:size=64m,mode=1777
+    cap_drop: [ALL]
+    security_opt:
+      - no-new-privileges:true
+    restart: unless-stopped
+
+volumes:
+  easy-runners-data:
+
+networks:
+  easy-runners:
+    name: easy-runners
