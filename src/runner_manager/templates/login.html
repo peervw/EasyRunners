@@ -7,18 +7,34 @@
     <link rel="stylesheet" href="/static/app.css?v={{ asset_version }}">
   </head>
   <body class="login-page">
-    <main class="login-card">
-      <div class="brand-mark">ER</div>
-      <h1>EasyRunners</h1>
-      <p class="muted">Ephemeral GitHub Actions capacity</p>
-      {% if error %}<div class="alert danger">{{ error }}</div>{% endif %}
-      <form method="post" action="/auth/login">
-        <input type="hidden" name="next_url" value="{{ next_url or '/' }}">
-        <label for="password">Administrator password</label>
-        <input id="password" name="password" type="password" autocomplete="current-password" required autofocus>
-        <button type="submit">Sign in</button>
-      </form>
-      <p class="hint">On first boot, find the one-time password in <code>docker compose logs manager</code>.</p>
+    <main class="login-shell">
+      <section class="login-story" aria-label="EasyRunners overview">
+        <div class="brand login-brand"><span class="brand-mark small" aria-hidden="true">ER</span><span class="brand-copy"><strong>EasyRunners</strong><small>Runner control plane</small></span></div>
+        <div class="login-story-copy">
+          <p class="eyebrow">YOUR INFRASTRUCTURE</p>
+          <h1>Fresh runners.<br>Only when you need them.</h1>
+          <p>Secure, ephemeral GitHub Actions capacity without the operational weight of a full orchestration platform.</p>
+        </div>
+        <ul class="feature-list">
+          <li><i aria-hidden="true">✓</i> Scale from zero on every matching job</li>
+          <li><i aria-hidden="true">✓</i> Clean container and workspace every time</li>
+          <li><i aria-hidden="true">✓</i> One universal image for Docker, Rust, and Python</li>
+        </ul>
+      </section>
+      <section class="login-card">
+        <div class="mobile-login-brand"><span class="brand-mark" aria-hidden="true">ER</span></div>
+        <p class="eyebrow">WELCOME BACK</p>
+        <h2>Sign in to EasyRunners</h2>
+        <p class="muted">Manage pools, inspect jobs, and connect repositories.</p>
+        {% if error %}<div class="alert danger" role="alert">{{ error }}</div>{% endif %}
+        <form method="post" action="/auth/login">
+          <input type="hidden" name="next_url" value="{{ next_url or '/' }}">
+          <label for="password">Administrator password</label>
+          <input id="password" name="password" type="password" autocomplete="current-password" placeholder="Enter your password" required autofocus>
+          <button type="submit">Sign in</button>
+        </form>
+        <div class="login-help"><span aria-hidden="true">i</span><p>First boot? Find the one-time password in <code>docker compose logs manager</code>.</p></div>
+      </section>
     </main>
   </body>
 </html>

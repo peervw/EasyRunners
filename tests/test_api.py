@@ -80,7 +80,9 @@ def test_login_dashboard_csrf_and_api_token(client) -> None:
     assert dashboard.status_code == 200
     assert dashboard.headers["Cache-Control"] == "no-store"
     assert "GitHub account or organization URL" in dashboard.text
-    assert "Advanced settings" in dashboard.text
+    assert "Your runner fleet" in dashboard.text
+    assert "Workflow activity" in dashboard.text
+    assert "Administration" in dashboard.text
     asset_version = app.state.templates.env.globals["asset_version"]
     assert f'/static/app.js?v={asset_version}' in dashboard.text
     versioned_asset = test_client.get(f"/static/app.js?v={asset_version}")
