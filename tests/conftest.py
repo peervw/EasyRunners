@@ -17,7 +17,7 @@ def settings(tmp_path: Path) -> Settings:
         runner_network=None,
         runner_pools={
             "default": RunnerPoolConfig(
-                labels=["self-hosted", "linux", "x64", "docker"],
+                labels=["self-hosted", "linux", "docker"],
                 min=0,
                 max=5,
                 docker_mode=DockerMode.NONE,

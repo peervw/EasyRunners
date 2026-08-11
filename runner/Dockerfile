@@ -1,9 +1,10 @@
 # syntax=docker/dockerfile:1.7
-FROM ubuntu:24.04 AS base
+FROM ubuntu:24.04 AS runner
 
 ARG RUNNER_VERSION=2.336.0
 ARG RUNNER_SHA256_X64=04cf0be1aff4c3ec3554466c39124ca250e3effd8873bb7e8d68535aa9505d5d
 ARG RUNNER_SHA256_ARM64=58b758e420b87093fbd4bfddd368074960053e2f1388f01848c82624b90f27d1
+ARG RUST_TOOLCHAIN=stable
 ARG TARGETARCH
 
 ENV DEBIAN_FRONTEND=noninteractive
@@ -11,7 +12,8 @@ RUN --mount=type=cache,id=easyrunners-runner-apt-cache,target=/var/cache/apt,sha
     --mount=type=cache,id=easyrunners-runner-apt-lists,target=/var/lib/apt,sharing=locked \
     apt-get update && apt-get install -y --no-install-recommends \
       bash build-essential ca-certificates curl docker.io git jq \
-      libicu74 libssl3 python3 python3-pip python3-venv sudo tar unzip zip \
+      clang cmake libicu74 libssl-dev libssl3 lld pkg-config protobuf-compiler \
+      python3 python3-pip python3-venv sudo tar unzip zip \
     && rm -rf /var/lib/apt/lists/*
 
 RUN groupadd --gid 1001 runner \
@@ -37,19 +39,7 @@ RUN case "${TARGETARCH}" in \
 
 COPY runner/entrypoint.sh /entrypoint.sh
 RUN chmod 0755 /entrypoint.sh
-USER 1001:1001
-ENTRYPOINT ["/entrypoint.sh"]
 
-FROM base AS rust
-
-USER root
-RUN --mount=type=cache,id=easyrunners-runner-apt-cache,target=/var/cache/apt,sharing=locked \
-    --mount=type=cache,id=easyrunners-runner-apt-lists,target=/var/lib/apt,sharing=locked \
-    apt-get update && apt-get install -y --no-install-recommends \
-      clang cmake libssl-dev lld pkg-config protobuf-compiler \
-    && rm -rf /var/lib/apt/lists/*
-
-ARG RUST_TOOLCHAIN=stable
 ENV CARGO_HOME=/home/runner/.cargo \
     RUSTUP_HOME=/home/runner/.rustup \
     PATH=/home/runner/.cargo/bin:${PATH}
@@ -63,3 +53,5 @@ RUN curl --proto '=https' --tlsv1.2 --fail --silent --show-error \
     && rustup default "${RUST_TOOLCHAIN}" \
     && rustc --version \
     && cargo --version
+
+ENTRYPOINT ["/entrypoint.sh"]

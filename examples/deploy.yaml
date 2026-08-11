@@ -2,10 +2,13 @@ name: Deploy
 on:
   workflow_dispatch:
 
+permissions:
+  contents: read
+
 jobs:
   production:
-    runs-on: [self-hosted, linux, x64, deploy]
+    runs-on: [self-hosted, linux, deploy]
     environment: production
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
       - run: ./scripts/deploy.sh

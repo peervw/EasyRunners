@@ -4,7 +4,7 @@ import pytest
 
 from runner_manager.database import Database
 from runner_manager.demand import DemandTracker
-from runner_manager.models import RunnerPoolConfig, WorkflowJob
+from runner_manager.models import NATIVE_ARCHITECTURE, RunnerPoolConfig, WorkflowJob
 
 
 @pytest.mark.asyncio
@@ -17,7 +17,7 @@ async def test_webhook_lifecycle_and_history(tmp_path: Path) -> None:
             "id": 1,
             "run_id": 2,
             "name": "test",
-            "labels": ["self-hosted", "linux", "x64", "docker"],
+            "labels": ["self-hosted", "linux", NATIVE_ARCHITECTURE, "docker"],
             "created_at": "2026-01-01T00:00:00Z",
         },
     }

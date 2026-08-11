@@ -11,13 +11,13 @@ permissions:
 
 jobs:
   test:
-    runs-on: [self-hosted, linux, x64, rust]
+    runs-on: [self-hosted, linux, rust]
     timeout-minutes: 60
     env:
       CARGO_TERM_COLOR: always
       RUST_BACKTRACE: "1"
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
       - name: Toolchain information
         run: rustc --version --verbose && cargo --version
       - name: Restore Cargo cache

@@ -1,3 +1,4 @@
+import sqlite3
 from pathlib import Path
 
 import pytest
@@ -5,6 +6,7 @@ import pytest
 from runner_manager.auth import AuthManager
 from runner_manager.config import Settings
 from runner_manager.database import Database
+from runner_manager.models import TokenScope
 
 
 @pytest.fixture
@@ -47,14 +49,54 @@ def test_password_policy_and_recovery(auth_stack) -> None:
 
 def test_api_token_is_one_way_and_revocable(auth_stack) -> None:
     auth, database = auth_stack
-    token, record = auth.create_api_token("prometheus")
+    token, record = auth.create_api_token("prometheus", TokenScope.METRICS, 30)
     assert token.startswith(f"ert_{record['id']}_")
     assert token not in str(database.get_api_token(record["id"]))
+    assert record["scope"] == "metrics"
+    assert record["expires_at"]
     assert auth.verify_api_token(token)
     assert not auth.verify_api_token(token + "x")
     assert database.delete_api_token(record["id"])
     assert not auth.verify_api_token(token)
     database.close()
+
+
+def test_expired_api_token_is_rejected(auth_stack) -> None:
+    auth, database = auth_stack
+    token, record = auth.create_api_token("short-lived", TokenScope.READ, 1)
+    settings = auth.settings
+    path = database.path
+    database.close()
+    with sqlite3.connect(path) as connection:
+        connection.execute(
+            "UPDATE api_tokens SET expires_at = ? WHERE id = ?",
+            ("2020-01-01T00:00:00+00:00", record["id"]),
+        )
+    reopened = Database(path)
+    assert AuthManager(settings, reopened).authenticate_api_token(token) is None
+    reopened.close()
+
+
+def test_legacy_api_tokens_migrate_with_manage_scope(tmp_path: Path) -> None:
+    path = tmp_path / "legacy.sqlite3"
+    with sqlite3.connect(path) as connection:
+        connection.execute(
+            "CREATE TABLE api_tokens ("
+            "id TEXT PRIMARY KEY, name TEXT NOT NULL, digest TEXT NOT NULL, "
+            "created_at TEXT NOT NULL, last_used_at TEXT)"
+        )
+        connection.execute(
+            "INSERT INTO api_tokens VALUES (?, ?, ?, ?, ?)",
+            ("old", "legacy", "digest", "2026-01-01T00:00:00+00:00", None),
+        )
+
+    database = Database(path)
+    record = database.get_api_token("old")
+    assert record and record["scope"] == "manage"
+    assert record["expires_at"] is None
+    database.close()
+    with sqlite3.connect(path) as connection:
+        assert connection.execute("PRAGMA user_version").fetchone()[0] == 2
 
 
 def test_login_rate_window(auth_stack) -> None:

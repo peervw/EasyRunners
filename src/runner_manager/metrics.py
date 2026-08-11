@@ -30,6 +30,10 @@ GITHUB_API_FAILURES = Counter(
     "GitHub API request failures",
     ["operation", "status"],
 )
+GITHUB_RATE_LIMIT_REMAINING = Gauge(
+    "github_runner_manager_github_rate_limit_remaining",
+    "Remaining GitHub REST API requests reported by GitHub",
+)
 WEBHOOK_FAILURES = Counter(
     "github_runner_manager_webhook_validation_failures_total",
     "Rejected GitHub webhook deliveries",

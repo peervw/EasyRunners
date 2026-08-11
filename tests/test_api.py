@@ -3,12 +3,13 @@ import hmac
 import json
 from typing import Any
 
+import httpx
 import pytest
 from fastapi.testclient import TestClient
 
 import runner_manager.main as main_module
 from runner_manager.main import create_app
-from runner_manager.models import GitHubSetupRequest
+from runner_manager.models import NATIVE_ARCHITECTURE, GitHubSetupRequest
 
 
 class NoopDocker:
@@ -82,7 +83,7 @@ def test_login_dashboard_csrf_and_api_token(client) -> None:
     response = test_client.post(
         "/api/auth/tokens",
         headers={"X-CSRF-Token": csrf},
-        json={"name": "automation"},
+        json={"name": "automation", "scope": "manage", "expires_in_days": 30},
     )
     assert response.status_code == 200
     token = response.json()["token"]
@@ -90,6 +91,33 @@ def test_login_dashboard_csrf_and_api_token(client) -> None:
         test_client.get("/api/status", headers={"Authorization": f"Bearer {token}"}).status_code
         == 200
     )
+    read_response = test_client.post(
+        "/api/auth/tokens",
+        headers={"X-CSRF-Token": csrf},
+        json={"name": "dashboard", "scope": "read"},
+    )
+    read_token = read_response.json()["token"]
+    assert (
+        test_client.get(
+            "/api/status", headers={"Authorization": f"Bearer {read_token}"}
+        ).status_code
+        == 200
+    )
+    assert (
+        test_client.post(
+            "/api/reconcile", headers={"Authorization": f"Bearer {read_token}"}
+        ).status_code
+        == 403
+    )
+    metrics_response = test_client.post(
+        "/api/auth/tokens",
+        headers={"X-CSRF-Token": csrf},
+        json={"name": "prometheus", "scope": "metrics"},
+    )
+    metrics_token = metrics_response.json()["token"]
+    metrics_headers = {"Authorization": f"Bearer {metrics_token}"}
+    assert test_client.get("/metrics", headers=metrics_headers).status_code == 200
+    assert test_client.get("/api/status", headers=metrics_headers).status_code == 403
     assert (
         test_client.post(
             "/api/pools/default/scale",
@@ -145,7 +173,7 @@ def test_one_url_setup_and_callback_login_recovery(client, monkeypatch) -> None:
     assert callback.headers["location"].startswith("/auth/login?next=")
 
 
-def test_pool_crud_yaml_workflow_and_readiness(client) -> None:
+def test_pool_crud_yaml_and_readiness(client) -> None:
     test_client, app = client
     _, csrf = login(test_client, app)
     response = test_client.put(
@@ -157,13 +185,6 @@ def test_pool_crud_yaml_workflow_and_readiness(client) -> None:
     assert "build" in response.json()["pools"]
     exported = test_client.get("/api/pools/config.yaml")
     assert "runner_pools:" in exported.text
-    workflow = test_client.get("/api/pools/build/workflow?template=python")
-    assert workflow.status_code == 200
-    assert "runs-on: [self-hosted, linux, x64, build]" in workflow.json()["yaml"]
-    rust_workflow = test_client.get("/api/pools/build/workflow?template=rust")
-    assert rust_workflow.status_code == 200
-    assert "Swatinem/rust-cache@49a0bdc" in rust_workflow.json()["yaml"]
-    assert "cargo clippy" in rust_workflow.json()["yaml"]
     readiness = test_client.get("/api/readiness").json()
     assert readiness["checks"]["docker"]["ok"] is True
     assert readiness["checks"]["runner_images"]["ok"] is True
@@ -181,6 +202,7 @@ def test_pool_crud_yaml_workflow_and_readiness(client) -> None:
     assert imported.status_code == 200
     assert set(imported.json()["pools"]) == {"isolated"}
     assert app.state.database.get_setting("runner_pools_override")
+    assert test_client.get("/api/pools/default/workflow").status_code == 404
 
 
 def test_github_status_lists_selected_repositories(client, monkeypatch) -> None:
@@ -205,17 +227,52 @@ def test_github_status_lists_selected_repositories(client, monkeypatch) -> None:
     assert response.json()["repositories"] == ["peer/one", "peer/two"]
     assert response.json()["repository_bound"] is True
     assert response.json()["configure_url"].endswith("/settings/installations/2")
-    workflow = test_client.get(
-        "/api/pools/default/workflow?template=python&repository=peer/two"
+
+
+def test_github_status_lists_repositories_when_metadata_refresh_fails(
+    client, monkeypatch
+) -> None:
+    test_client, app = client
+    _, _ = login(test_client, app)
+    app.state.github_store.save_manifest_result(
+        GitHubSetupRequest(scope="repo", owner="peer"),
+        {"id": 1, "slug": "easy", "pem": "PRIVATE", "webhook_secret": "secret"},
     )
-    assert workflow.status_code == 200
-    assert workflow.json()["create_url"] == "https://github.com/peer/two/actions/new"
-    assert (
-        test_client.get(
-            "/api/pools/default/workflow?template=python&repository=peer/missing"
-        ).status_code
-        == 422
-    )
+    app.state.github_store.save_installation(2, repository_selection="selected")
+
+    async def metadata(*, refresh=False):
+        raise httpx.HTTPError("installation metadata unavailable")
+
+    async def repositories(*, refresh=False):
+        return ["peer/one", "peer/two"]
+
+    monkeypatch.setattr(app.state.github, "refresh_installation_metadata", metadata)
+    monkeypatch.setattr(app.state.github, "list_repositories", repositories)
+
+    response = test_client.get("/api/github")
+
+    assert response.status_code == 200
+    assert response.json()["repositories"] == ["peer/one", "peer/two"]
+    assert response.json()["metadata_error"] == "installation metadata unavailable"
+    assert response.json()["repositories_error"] is None
+
+
+def test_diagnostic_archives_are_authenticated_and_downloadable(client) -> None:
+    test_client, app = client
+    directory = app.state.settings.data_dir / "runner-logs"
+    directory.mkdir()
+    (directory / "runner-one.tar").write_bytes(b"archive")
+    (directory / "manager-secret.txt").write_text("not a diagnostic")
+    (directory / "linked.log").symlink_to(directory / "runner-one.tar")
+    assert test_client.get("/api/diagnostics").status_code == 401
+
+    _, _ = login(test_client, app)
+    response = test_client.get("/api/diagnostics")
+    assert [item["name"] for item in response.json()] == ["runner-one.tar"]
+    assert test_client.get("/api/diagnostics/runner-one.tar").content == b"archive"
+    assert test_client.get("/api/diagnostics/manager-secret.txt").status_code == 404
+    assert test_client.get("/api/diagnostics/linked.log").status_code == 404
+    assert test_client.get("/api/diagnostics/%2E%2E%2Fstate.sqlite3").status_code == 404
 
 
 def test_runner_request_carries_repository_and_pool(client, monkeypatch) -> None:
@@ -256,7 +313,7 @@ def test_webhook_signature_replay_and_demand(client) -> None:
             "id": 7,
             "run_id": 9,
             "name": "test",
-            "labels": ["self-hosted", "linux", "x64", "docker"],
+            "labels": ["self-hosted", "linux", NATIVE_ARCHITECTURE, "docker"],
         },
     }
     raw = json.dumps(payload).encode()
@@ -291,7 +348,7 @@ def test_repo_app_accepts_another_selected_repository_webhook(client) -> None:
             "id": 8,
             "run_id": 10,
             "name": "build",
-            "labels": ["self-hosted", "linux", "x64", "docker"],
+            "labels": ["self-hosted", "linux", NATIVE_ARCHITECTURE, "docker"],
         },
     }
     raw = json.dumps(payload).encode()

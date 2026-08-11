@@ -76,6 +76,7 @@ class Scheduler:
         self._last_queue_poll = 0.0
         self._last_full_poll = 0.0
         self._last_runner_sweep = 0.0
+        self._pool_errors: dict[str, str] = {}
 
     def start(self) -> None:
         if not self._task:
@@ -469,7 +470,9 @@ class Scheduler:
                     )
                     live.append(created)
                     pool_runners.append(created)
+                    self._pool_errors.pop(pool_name, None)
                 except Exception as exc:
+                    self._pool_errors[pool_name] = str(exc)
                     RUNNER_CREATION_FAILURES.labels(pool=pool_name).inc()
                     log.exception("runner.create_failed", pool=pool_name, error=str(exc))
                     break
@@ -630,4 +633,49 @@ class Scheduler:
                 else None
             )
             result.append(runner)
+        return result
+
+    async def job_views(self) -> list[dict[str, Any]]:
+        jobs = await self.demand.snapshot()
+        result: list[dict[str, Any]] = []
+        for job in jobs:
+            view = job.model_dump(mode="json")
+            code: str | None = None
+            detail: str | None = None
+            if job.status == "queued":
+                if not job.pool:
+                    code = "no_matching_pool"
+                    detail = "No runner pool has every requested label."
+                elif not self._github_connected:
+                    code = "github_unavailable"
+                    detail = self._last_error or "GitHub is currently unavailable."
+                elif not self._docker_connected:
+                    code = "docker_unavailable"
+                    detail = "Docker Engine is currently unavailable."
+                else:
+                    pool = self.settings.runner_pools[job.pool]
+                    runners = [runner for runner in self._runners if runner.pool == job.pool]
+                    repository_runners = [
+                        runner
+                        for runner in runners
+                        if not job.repository or runner.repository in {None, job.repository}
+                    ]
+                    if error := self._pool_errors.get(job.pool):
+                        code = "runner_creation_failed"
+                        detail = error
+                    elif any(runner.state == "starting" for runner in repository_runners):
+                        code = "runner_starting"
+                        detail = "A matching runner is registering with GitHub."
+                    elif any(runner.state == "idle" for runner in repository_runners):
+                        code = "awaiting_assignment"
+                        detail = "A matching runner is online and waiting for GitHub assignment."
+                    elif len(runners) >= pool.max:
+                        code = "pool_at_capacity"
+                        detail = f"Pool {job.pool!r} is at its maximum of {pool.max} runners."
+                    else:
+                        code = "awaiting_reconcile"
+                        detail = "Capacity will be created during the next reconciliation."
+            view["waiting_code"] = code
+            view["waiting_reason"] = detail
+            result.append(view)
         return result
