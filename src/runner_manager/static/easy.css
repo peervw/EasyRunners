@@ -54,3 +54,8 @@ summary { cursor: pointer; color: var(--muted); }
 .access-warning { border: 1px solid #745d26; border-radius: 8px; padding: 10px; color: var(--warning); }
 .workflow-form { margin-top: 14px; }
 .unmatched { color: var(--warning); white-space: normal; }
+.advanced-panel > summary { font-size: 16px; }
+.advanced-content { margin-top: 18px; }
+.nested-panel { border-top: 1px solid var(--line); padding-top: 20px; margin-top: 20px; }
+.setup-advanced { margin: 0; }
+.connection-actions { align-items: center; flex-wrap: wrap; }

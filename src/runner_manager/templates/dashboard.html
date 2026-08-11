@@ -33,7 +33,7 @@
 
       <section class="hero">
         <div><p class="eyebrow">CONTROL PLANE</p><h1>Runner capacity</h1></div>
-        <div class="actions"><span id="version" class="muted"></span><button id="reconcile">Reconcile now</button></div>
+        <span id="version" class="muted"></span>
       </section>
 
       <section id="connection" class="panel">
@@ -46,17 +46,27 @@
           <button id="disconnect-github" class="secondary">Start over</button>
         </div>
         {% elif connection and connection.installation_id %}
-        <div class="actions">
-          <button id="test-runner">Test a runner</button>
+        <div class="actions connection-actions">
+          <form id="test-runner-form" class="inline-form">
+            <select id="test-repository" name="repository" aria-label="Test repository"></select>
+            <select id="test-pool" name="pool" aria-label="Test runner pool"></select>
+            <button>Test a runner</button>
+          </form>
           <button id="disconnect-github" class="secondary">Disconnect locally</button>
         </div>
         {% endif %}
         {% if not connection and not must_change %}
         <form id="github-setup" class="setup-grid">
-          <label class="wide">Start with a GitHub repository URL<input name="target_url" placeholder="https://github.com/owner/repository" required></label>
-          <label class="check-label"><input name="organization_wide" type="checkbox"> Use shared organization runners instead</label>
-          <label class="check-label"><input name="webhook_enabled" type="checkbox" {% if webhook_enabled %}checked{% endif %}> Instant scaling with a public HTTPS webhook</label>
+          <label class="wide">GitHub account or organization URL<input name="target_url" placeholder="https://github.com/owner" required></label>
           <p class="muted wide">On GitHub, select every repository that should use EasyRunners. Personal-account runners stay isolated to the repository that requested them.</p>
+          <details class="wide setup-advanced">
+            <summary>Advanced connection options</summary>
+            <div class="setup-grid advanced-content">
+              <label class="check-label"><input name="organization_wide" type="checkbox"> Use shared organization runners</label>
+              <label class="check-label"><input name="webhook_enabled" type="checkbox" {% if webhook_enabled %}checked{% endif %}> Instant scaling with a public HTTPS webhook</label>
+              <p class="muted wide">Shared runners require an organization and should be restricted with GitHub runner groups. Disable webhooks only for private/LAN polling-only deployments.</p>
+            </div>
+          </details>
           <button type="submit">Connect GitHub</button><span id="setup-progress" class="muted"></span>
         </form>
         {% endif %}
@@ -72,6 +82,7 @@
         <div class="section-heading"><h2>Use an existing workflow</h2><span class="badge">One line</span></div>
         <p>In any selected repository, replace the job's current <code>runs-on</code> line:</p>
         <div class="quickstart-line">
+          <select id="quickstart-repository" aria-label="GitHub repository"></select>
           <select id="quickstart-pool" aria-label="Runner pool"></select>
           <code id="runs-on-line">runs-on: [self-hosted, linux, x64, docker]</code>
           <button id="copy-runs-on" class="secondary">Copy line</button>
@@ -89,30 +100,37 @@
         </details>
       </section>
 
-      <section><div class="section-heading"><h2>Runner pools</h2><span id="updated" class="muted"></span></div><div id="pools" class="card-grid"></div></section>
-      <section class="panel">
-        <div class="section-heading"><h2>Add or edit a pool</h2><div class="actions"><button id="rust-pool" class="secondary compact">Rust preset</button><button id="new-pool" class="secondary compact">New</button></div></div>
-        <form id="pool-form" class="setup-grid">
-          <label>Name<input name="pool_name" value="default" pattern="[A-Za-z0-9_.-]+" required></label>
-          <label>Labels<input name="labels" value="self-hosted,linux,x64,docker" required></label>
-          <label>Minimum<input name="min" type="number" min="0" value="0" required></label>
-          <label>Maximum<input name="max" type="number" min="0" value="5" required></label>
-          <label>CPU cores<input name="cpu" type="number" min="0.1" step="0.1" value="4" required></label>
-          <label>Memory<input name="memory" value="8g" required></label>
-          <label>Runner image<input name="image" placeholder="Blank uses the label preset"></label>
-          <label>Docker access<select name="docker_mode"><option value="socket">Docker socket</option><option value="none">No Docker</option></select></label>
-          <button>Save pool</button>
-        </form>
-        <details>
-          <summary>YAML import / export</summary>
-          <textarea id="pool-yaml" class="code-editor" spellcheck="false"></textarea>
-          <div class="actions"><button id="export-pools" class="secondary">Export current</button><button id="import-pools">Import and replace</button></div>
-        </details>
-      </section>
       <section class="panel"><div class="section-heading"><h2>Active runners</h2><span id="runner-count" class="badge">0</span></div><div class="table-wrap"><table><thead><tr><th>Runner</th><th>Repository</th><th>Pool</th><th>State</th><th>Uptime</th><th>Container</th><th>Labels</th></tr></thead><tbody id="runners"></tbody></table></div></section>
       <section class="panel"><div class="section-heading"><h2>Queued and active jobs</h2><span id="job-count" class="badge">0</span></div><div class="table-wrap"><table><thead><tr><th>Job</th><th>Repository</th><th>Pool</th><th>Status</th><th>Runner</th><th>Queued</th></tr></thead><tbody id="jobs"></tbody></table></div></section>
       <section class="panel"><div class="section-heading"><h2>Recent jobs</h2></div><div class="table-wrap"><table><thead><tr><th>Job</th><th>Repository</th><th>Pool</th><th>Conclusion</th><th>Completed</th></tr></thead><tbody id="history"></tbody></table></div></section>
-      <section class="panel"><div class="section-heading"><h2>API tokens</h2></div><form id="token-form" class="inline-form"><input name="name" placeholder="Token name" required><button>Create token</button></form><div id="new-token"></div><ul id="tokens" class="token-list"></ul></section>
+
+      <details class="panel advanced-panel">
+        <summary><strong>Advanced settings</strong> <span class="muted">Pools, manual capacity, API tokens, and reconciliation</span></summary>
+        <div class="advanced-content">
+          <section><div class="section-heading"><h2>Runner pools</h2><div class="actions"><span id="updated" class="muted"></span><button id="reconcile" class="secondary compact">Reconcile now</button></div></div><div id="pools" class="card-grid"></div></section>
+          <section class="nested-panel">
+            <div class="section-heading"><h2>Add or edit a pool</h2><div class="actions"><button id="rust-pool" class="secondary compact">Rust preset</button><button id="new-pool" class="secondary compact">New</button></div></div>
+            <form id="pool-form" class="setup-grid">
+              <label>Name<input name="pool_name" value="default" pattern="[A-Za-z0-9_.-]+" required></label>
+              <label>Labels<input name="labels" value="self-hosted,linux,x64,docker" required></label>
+              <label>Minimum<input name="min" type="number" min="0" value="0" required></label>
+              <label>Maximum<input name="max" type="number" min="0" value="5" required></label>
+              <label>CPU cores<input name="cpu" type="number" min="0.1" step="0.1" value="4" required></label>
+              <label>Memory<input name="memory" value="8g" required></label>
+              <label>Runner image<input name="image" placeholder="Blank uses the label preset"></label>
+              <label>Docker access<select name="docker_mode"><option value="socket">Docker socket</option><option value="none">No Docker</option></select></label>
+              <button>Save pool</button>
+            </form>
+            <p class="muted">For repository-isolated runners, use repository-specific pre-warming below. A non-zero pool minimum is assigned to the first selected repository.</p>
+            <details>
+              <summary>YAML import / export</summary>
+              <textarea id="pool-yaml" class="code-editor" spellcheck="false"></textarea>
+              <div class="actions"><button id="export-pools" class="secondary">Export current</button><button id="import-pools">Import and replace</button></div>
+            </details>
+          </section>
+          <section class="nested-panel"><div class="section-heading"><h2>API tokens</h2></div><form id="token-form" class="inline-form"><input name="name" placeholder="Token name" required><button>Create token</button></form><div id="new-token"></div><ul id="tokens" class="token-list"></ul></section>
+        </div>
+      </details>
     </main>
     <div id="toasts" class="toast-area" aria-live="polite"></div>
   </body>

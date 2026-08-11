@@ -5,6 +5,8 @@ const esc = value => String(value ?? '').replace(
   character => ({'&': '&amp;', '<': '&lt;', '>': '&gt;', "'": '&#39;', '"': '&quot;'}[character]),
 );
 let poolConfigs = {};
+let githubRepositories = [];
+let repositoryBound = false;
 let refreshing = false;
 
 function toast(message, kind = 'error') {
@@ -32,6 +34,11 @@ function updateRunsOn() {
   const pool = document.querySelector('#quickstart-pool')?.value;
   const labels = orderedLabels(poolConfigs[pool]?.labels || []);
   document.querySelector('#runs-on-line').textContent = `runs-on: [${labels.join(', ')}]`;
+}
+
+function repositoryOptions() {
+  if (!repositoryBound) return '<option value="">Shared organization runner</option>';
+  return githubRepositories.map(repository => `<option value="${esc(repository)}">${esc(repository)}</option>`).join('');
 }
 
 async function json(url, options = {}) {
@@ -95,7 +102,7 @@ async function refresh() {
     document.querySelector('#connection-details').innerHTML = github.connection
       ? `<strong>${esc(github.connection.owner)} · ${esc(mode)}</strong>`
         + `<p class="muted">App: ${esc(github.connection.app_slug || 'manual')} · Installation: ${esc(github.connection.installation_id || 'pending')} · ${github.connection.webhook_enabled ? 'webhook + polling' : 'polling only'} · ${repositoryCount} ${repositoryCount === 1 ? 'repository' : 'repositories'}</p>`
-      : '<p class="muted">Paste one GitHub URL below. EasyRunners detects the scope and account type.</p>';
+      : '<p class="muted">Paste your GitHub account or organization URL below. Repository access is selected on GitHub.</p>';
     const selection = github.connection?.repository_selection;
     const accessWarning = selection === 'all'
       ? '<p class="access-warning">GitHub granted this App access to all repositories. EasyRunners can serve matching jobs from any of them. Select only the repositories you trust.</p>'
@@ -109,6 +116,8 @@ async function refresh() {
     document.querySelector('#repository-access').innerHTML = github.connection
       ? `${accessWarning}${repositoryList}${configure}`
       : '';
+    githubRepositories = github.repositories || [];
+    repositoryBound = Boolean(github.repository_bound);
     document.querySelector('#updated').textContent = status.last_reconcile
       ? `Updated ${new Date(status.last_reconcile).toLocaleTimeString()}`
       : '';
@@ -128,8 +137,10 @@ async function refresh() {
           <div class="stat"><b>${pool.busy}</b><span>Busy</span></div>
         </div>
         <div class="labels">${pool.labels.map(label => `<span class="label">${esc(label)}</span>`).join('')}</div>
+        ${pool.manual_floors?.length ? `<p class="muted">${pool.manual_floors.map(floor => `${esc(floor.repository || 'organization')}: ${floor.desired} pre-warmed`).join(' · ')}</p>` : ''}
         <form class="scale-form inline-form" data-pool="${esc(name)}">
-          <input name="desired" type="number" min="0" max="${pool.max}" value="${pool.manual_floor || 0}" aria-label="Desired pre-warm">
+          ${repositoryBound ? `<select name="repository" aria-label="Pre-warm repository" required>${repositoryOptions()}</select>` : ''}
+          <input name="desired" type="number" min="0" max="${pool.max}" value="0" aria-label="Desired pre-warm">
           <input name="ttl" type="number" min="30" value="600" aria-label="TTL seconds">
           <button>Pre-warm</button>
         </form>
@@ -144,6 +155,24 @@ async function refresh() {
     const selectedQuickstartPool = quickstartPool.value;
     quickstartPool.innerHTML = Object.keys(status.pools).map(name => `<option value="${esc(name)}">${esc(name)}</option>`).join('');
     if (status.pools[selectedQuickstartPool]) quickstartPool.value = selectedQuickstartPool;
+    const quickstartRepository = document.querySelector('#quickstart-repository');
+    const selectedQuickstartRepository = quickstartRepository.value;
+    quickstartRepository.innerHTML = repositoryOptions();
+    quickstartRepository.classList.toggle('hidden', !repositoryBound);
+    if (githubRepositories.includes(selectedQuickstartRepository)) quickstartRepository.value = selectedQuickstartRepository;
+    const testRepository = document.querySelector('#test-repository');
+    if (testRepository) {
+      const selectedTestRepository = testRepository.value;
+      testRepository.innerHTML = repositoryOptions();
+      testRepository.classList.toggle('hidden', !repositoryBound);
+      if (githubRepositories.includes(selectedTestRepository)) testRepository.value = selectedTestRepository;
+    }
+    const testPool = document.querySelector('#test-pool');
+    if (testPool) {
+      const selectedTestPool = testPool.value;
+      testPool.innerHTML = Object.keys(status.pools).map(name => `<option value="${esc(name)}">${esc(name)}</option>`).join('');
+      if (status.pools[selectedTestPool]) testPool.value = selectedTestPool;
+    }
     updateRunsOn();
 
     document.querySelector('#runner-count').textContent = runners.length;
@@ -152,7 +181,7 @@ async function refresh() {
       : '<tr><td colspan="7" class="muted">No managed runners.</td></tr>';
     document.querySelector('#job-count').textContent = jobs.length;
     document.querySelector('#jobs').innerHTML = jobs.length
-      ? jobs.map(job => `<tr><td>${esc(job.name || job.id)}</td><td>${esc(job.repository)}</td><td>${job.pool ? esc(job.pool) : `<span class="unmatched">No pool matches [${job.labels.map(esc).join(', ')}]</span>`}</td><td><span class="badge ${esc(job.status)}">${esc(job.status)}</span></td><td>${esc(job.runner_name || '—')}</td><td>${job.queued_at ? new Date(job.queued_at).toLocaleString() : '—'}</td></tr>`).join('')
+      ? jobs.map(job => `<tr><td>${esc(job.name || job.id)}</td><td>${esc(job.repository)}</td><td>${job.pool ? esc(job.pool) : `<span class="unmatched">No pool matches [${job.labels.map(esc).join(', ')}]</span> <button class="secondary compact copy-replacement">Copy replacement</button>`}</td><td><span class="badge ${esc(job.status)}">${esc(job.status)}</span></td><td>${esc(job.runner_name || '—')}</td><td>${job.queued_at ? new Date(job.queued_at).toLocaleString() : '—'}</td></tr>`).join('')
       : '<tr><td colspan="6" class="muted">No queued or active jobs.</td></tr>';
     document.querySelector('#history').innerHTML = history.length
       ? history.map(job => `<tr><td>${esc(job.name || job.id)}</td><td>${esc(job.repository)}</td><td>${esc(job.pool || '—')}</td><td>${esc(job.conclusion || '—')}</td><td>${job.completed_at ? new Date(job.completed_at).toLocaleString() : '—'}</td></tr>`).join('')
@@ -185,7 +214,11 @@ function bindDynamic() {
     form.onsubmit = async event => {
       event.preventDefault();
       const result = await action(() => json(`/api/pools/${encodeURIComponent(form.dataset.pool)}/scale`, {
-        method: 'POST', headers, body: JSON.stringify({desired: Number(form.desired.value), ttl_seconds: Number(form.ttl.value)}),
+        method: 'POST', headers, body: JSON.stringify({
+          desired: Number(form.desired.value),
+          ttl_seconds: Number(form.ttl.value),
+          repository: form.repository?.value || null,
+        }),
       }), 'Pre-warm request applied.');
       if (result) refresh();
     };
@@ -206,14 +239,23 @@ function bindDynamic() {
       refresh();
     };
   });
+  document.querySelectorAll('.copy-replacement').forEach(button => {
+    button.onclick = async () => {
+      const content = document.querySelector('#runs-on-line').textContent;
+      await action(() => navigator.clipboard.writeText(content), 'Replacement runs-on line copied.');
+    };
+  });
 }
 
 document.querySelector('#reconcile')?.addEventListener('click', async () => {
   await action(() => json('/api/reconcile', {method: 'POST', headers}), 'Reconciliation completed.');
   refresh();
 });
-document.querySelector('#test-runner')?.addEventListener('click', async () => {
-  await action(() => json('/api/readiness/test-runner', {method: 'POST', headers}), 'Test runner requested. Watch the runner list.');
+document.querySelector('#test-runner-form')?.addEventListener('submit', async event => {
+  event.preventDefault();
+  const params = new URLSearchParams({pool: event.target.pool.value});
+  if (event.target.repository?.value) params.set('repository', event.target.repository.value);
+  await action(() => json(`/api/readiness/test-runner?${params}`, {method: 'POST', headers}), 'Test runner requested. Watch the runner list.');
   refresh();
 });
 document.querySelector('#disconnect-github')?.addEventListener('click', async () => {
@@ -283,7 +325,10 @@ document.querySelector('#import-pools')?.addEventListener('click', async () => {
 document.querySelector('#workflow-form')?.addEventListener('submit', async event => {
   event.preventDefault();
   const form = event.target;
-  const result = await action(() => json(`/api/pools/${encodeURIComponent(form.pool.value)}/workflow?template=${encodeURIComponent(form.template.value)}`));
+  const params = new URLSearchParams({template: form.template.value});
+  const repository = document.querySelector('#quickstart-repository')?.value;
+  if (repository) params.set('repository', repository);
+  const result = await action(() => json(`/api/pools/${encodeURIComponent(form.pool.value)}/workflow?${params}`));
   if (!result) return;
   document.querySelector('#workflow-yaml').value = result.yaml;
   const link = document.querySelector('#create-workflow-link');

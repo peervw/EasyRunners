@@ -61,10 +61,10 @@ advanced settings. Route the public HTTPS domain to the `manager` service on por
 ### 2. Connect GitHub
 
 The first boot prints an `auth.bootstrap_password` JSON event exactly once. Open `PUBLIC_URL`, sign
-in with that password, and replace it with a password of at least 14 characters. Paste a repository
-URL such as `https://github.com/peervw/prediction-market`, then select **Connect GitHub**:
+in with that password, and replace it with a password of at least 14 characters. Paste the account
+URL, such as `https://github.com/peervw`, then select **Connect GitHub**:
 
-1. EasyRunners detects the owner, repository, and account type from the URL.
+1. EasyRunners detects the account and whether it is a user or organization.
 2. GitHub creates the preconfigured private App and asks where to install it.
 3. Choose **Only select repositories** and select every trusted repository that should use these
    runners.
@@ -141,9 +141,11 @@ repositories**. Organization owners should also use runner groups and selected-r
 
 ### Manual GitHub App or PAT setup
 
-For headless installations set `GITHUB_AUTH_MODE=app` and provide `GITHUB_SCOPE`, target fields,
+For headless installations set `GITHUB_AUTH_MODE=app` and provide `GITHUB_SCOPE`, account fields,
 `GITHUB_APP_ID`, `GITHUB_INSTALLATION_ID`, and `GITHUB_APP_PRIVATE_KEY_PATH`. Mount the PEM into the
-manager container if it is not in `/data`.
+manager container if it is not in `/data`. `GITHUB_REPO` is optional for App authentication because
+the installation's selected repositories are discovered automatically; PAT repository mode still
+requires it.
 
 For development only, set `GITHUB_AUTH_MODE=pat` and `GITHUB_TOKEN`. Classic PATs require `repo` for
 private repositories or `admin:org` for organization runners. GitHub Apps are recommended because
@@ -247,11 +249,14 @@ uses a different layout.
   restore demand after restart.
 - Personal-account capacity is repository-bound. Pool maximums apply across all selected
   repositories, and the oldest queued matching jobs receive available slots first.
+- A non-zero pool minimum uses the first selected repository; explicit dashboard pre-warming names
+  the repository and is clearer for multi-repository installations.
 - Organization polling enumerates App installation repositories because GitHub has no single API
   endpoint for all queued organization jobs grouped by runner labels.
 - Starting containers count toward capacity. Busy runners are never stopped for ordinary scale-down.
 - Idle excess waits for `idle_timeout` and an assignment grace period.
-- Dashboard pre-warming is a temporary desired-capacity floor, not a permanent config change.
+- Dashboard pre-warming is a temporary desired-capacity floor, not a permanent config change. A
+  personal-account pre-warm always names its repository explicitly.
 - Exactly one manager replica is supported.
 
 ## Docker builds and security
@@ -291,8 +296,10 @@ Endpoints:
 - `GET /api/readiness`, `/api/version`, and `/api/pools/{pool}/workflow`
 - `GET /api/jobs` for queued and in-progress workflow jobs
 - `PUT|DELETE /api/pools/{pool}` and YAML pool import/export endpoints
-- `POST /api/pools/{pool}/scale` with `{"desired": 2, "ttl_seconds": 600}`
-- `POST /api/readiness/test-runner` to pre-warm one runner for five minutes
+- `POST /api/pools/{pool}/scale` with
+  `{"desired": 2, "ttl_seconds": 600, "repository": "owner/repository"}`
+- `POST /api/readiness/test-runner?pool=rust&repository=owner/repository` to pre-warm one runner for
+  five minutes
 - `POST /api/reconcile`
 - `GET|POST /api/auth/tokens` and `DELETE /api/auth/tokens/{id}`
 - `GET /api/github`, setup/disconnect routes

@@ -64,7 +64,7 @@ class Scheduler:
         self.demand = demand
         self._lock = asyncio.Lock()
         self._stop = asyncio.Event()
-        self._manual: dict[str, ManualFloor] = {}
+        self._manual: dict[tuple[str, str | None], ManualFloor] = {}
         self._busy_since: dict[str, datetime] = {}
         self._idle_since: dict[str, datetime] = {}
         self._runners: list[ManagedRunner] = []
@@ -138,28 +138,63 @@ class Scheduler:
                 self._last_full_poll = now
             self._last_queue_poll = now
 
-    async def set_manual_floor(self, pool: str, desired: int, ttl_seconds: int) -> None:
+    async def _manual_repository(self, repository: str | None) -> str | None:
+        credentials = self.github.store.credentials()
+        repository_bound = bool(
+            credentials and credentials.connection.scope == GitHubScope.REPO
+        )
+        if not repository_bound:
+            if repository:
+                raise ValueError("organization runner pre-warming does not use a repository")
+            return None
+        if not repository:
+            raise ValueError("repository is required for repository-specific runners")
+        selected = await self.github.list_repositories()
+        match = next(
+            (item for item in selected if item.lower() == repository.lower()),
+            None,
+        )
+        if not match:
+            raise ValueError("repository is not selected in the GitHub App installation")
+        return match
+
+    async def set_manual_floor(
+        self,
+        pool: str,
+        desired: int,
+        ttl_seconds: int,
+        repository: str | None = None,
+    ) -> str | None:
         if pool not in self.settings.runner_pools:
             raise KeyError(pool)
         if desired > self.settings.runner_pools[pool].max:
             raise ValueError("desired capacity exceeds pool max")
+        target_repository = await self._manual_repository(repository)
+        key = (pool, target_repository)
         if desired == 0:
-            self._manual.pop(pool, None)
+            self._manual.pop(key, None)
         else:
-            self._manual[pool] = ManualFloor(
+            self._manual[key] = ManualFloor(
                 desired=desired,
                 expires_at=datetime.now(UTC) + timedelta(seconds=ttl_seconds),
             )
         await self.reconcile("manual_scale")
+        return target_repository
 
-    async def test_runner(self, pool: str | None = None) -> dict[str, Any]:
+    async def test_runner(
+        self, pool: str | None = None, repository: str | None = None
+    ) -> dict[str, Any]:
         selected = pool or ("default" if "default" in self.settings.runner_pools else None)
         if selected is None:
             selected = next(iter(self.settings.runner_pools), None)
         if not selected or selected not in self.settings.runner_pools:
             raise KeyError(selected or "")
-        await self.set_manual_floor(selected, 1, 300)
-        return {"pool": selected, "message": "Runner requested for five minutes"}
+        target_repository = await self.set_manual_floor(selected, 1, 300, repository)
+        return {
+            "pool": selected,
+            "repository": target_repository,
+            "message": "Runner requested for five minutes",
+        }
 
     async def replace_pools(self, pools: dict[str, RunnerPoolConfig]) -> None:
         if not pools:
@@ -183,9 +218,9 @@ class Scheduler:
         async with self._lock:
             self.settings.runner_pools = pools
             self.demand.pools = pools
-            for name in list(self._manual):
-                if name not in pools:
-                    self._manual.pop(name, None)
+            for key in list(self._manual):
+                if key[0] not in pools:
+                    self._manual.pop(key, None)
 
     async def reconcile(self, reason: str = "manual") -> dict[str, Any]:
         async with self._lock:
@@ -215,15 +250,20 @@ class Scheduler:
         repository_bound = bool(
             credentials and credentials.connection.scope == GitHubScope.REPO
         )
-        anchor_repository = (
-            credentials.connection.target_name if repository_bound and credentials else None
-        )
-        if anchor_repository:
+        legacy_anchor = None
+        if (
+            repository_bound
+            and credentials
+            and getattr(credentials.connection, "repository", None)
+        ):
+            legacy_anchor = credentials.connection.target_name
+        if legacy_anchor:
             for runner in containers:
                 # Containers created before multi-repository support belong to the original target.
-                runner.repository = runner.repository or anchor_repository
+                runner.repository = runner.repository or legacy_anchor
 
         github_runners: list[dict[str, Any]] = []
+        selected_repositories: list[str] = []
         if credentials:
             try:
                 repositories: list[str] | None = None
@@ -235,12 +275,25 @@ class Scheduler:
                     )
                     if full_sweep:
                         self._last_runner_sweep = monotonic()
+                        selected_repositories = await self.github.list_repositories()
+                        selected_names = {
+                            repository.lower() for repository in selected_repositories
+                        }
+                        for key in list(self._manual):
+                            if key[1] and key[1].lower() not in selected_names:
+                                self._manual.pop(key, None)
+                        repositories = selected_repositories
                     else:
                         jobs = await self.demand.snapshot()
                         repositories = sorted(
                             {
                                 *(runner.repository for runner in containers if runner.repository),
                                 *(job.repository for job in jobs),
+                                *(
+                                    repository
+                                    for _, repository in self._manual
+                                    if repository
+                                ),
                             }
                         )
                 github_runners = await self.github.list_runners(repositories)
@@ -314,19 +367,23 @@ class Scheduler:
             starting = sum(runner.state == "starting" for runner in pool_runners)
             idle = sum(runner.state == "idle" for runner in pool_runners)
             busy = sum(runner.state == "busy" for runner in pool_runners)
-            manual = self._manual.get(pool_name)
-            decision = calculate_scale(
-                pool,
-                queued=queued.get(pool_name, 0),
-                starting=starting,
-                idle=idle,
-                busy=busy,
-                manual_floor=manual.desired if manual else 0,
-            )
+            manual_floors = {
+                repository: floor
+                for (name, repository), floor in self._manual.items()
+                if name == pool_name
+            }
+            manual_total = sum(floor.desired for floor in manual_floors.values())
+            decision: ScaleDecision
             create_targets: list[str | None]
-            if repository_bound and anchor_repository:
+            desired_by_repository: dict[str, int] = {}
+            if repository_bound:
                 queued_repositories = await self.demand.queued_repositories(pool_name)
                 queued_by_repository = Counter(queued_repositories)
+                busy_by_repository = Counter(
+                    runner.repository
+                    for runner in pool_runners
+                    if runner.state == "busy" and runner.repository
+                )
                 starting_by_repository = Counter(
                     runner.repository
                     for runner in pool_runners
@@ -337,31 +394,67 @@ class Scheduler:
                     for runner in pool_runners
                     if runner.state == "idle" and runner.repository
                 )
+                for repository in {
+                    *queued_by_repository,
+                    *busy_by_repository,
+                    *(repository for repository in manual_floors if repository),
+                }:
+                    desired_by_repository[repository] = max(
+                        busy_by_repository[repository]
+                        + queued_by_repository[repository],
+                        manual_floors[repository].desired
+                        if repository in manual_floors
+                        else 0,
+                    )
+                desired_total = sum(desired_by_repository.values())
+                if pool.min > desired_total:
+                    if not selected_repositories:
+                        selected_repositories = await self.github.list_repositories()
+                    default_repository = legacy_anchor or next(
+                        iter(sorted(selected_repositories)), None
+                    )
+                    if default_repository:
+                        desired_by_repository[default_repository] = (
+                            desired_by_repository.get(default_repository, 0)
+                            + pool.min
+                            - desired_total
+                        )
+                target = min(pool.max, sum(desired_by_repository.values()))
+                total = starting + idle + busy
+                allowed_idle = max(0, target - busy - starting)
+                decision = ScaleDecision(
+                    target=target,
+                    create=max(0, target - total),
+                    excess_idle=max(0, idle - allowed_idle),
+                )
                 deficits = {
                     repository: max(
                         0,
-                        count
+                        desired
+                        - busy_by_repository[repository]
                         - starting_by_repository[repository]
                         - idle_by_repository[repository],
                     )
-                    for repository, count in queued_by_repository.items()
+                    for repository, desired in desired_by_repository.items()
                 }
                 create_targets = []
                 for repository in queued_repositories:
                     if deficits[repository] > 0:
                         create_targets.append(repository)
                         deficits[repository] -= 1
+                for repository in sorted(deficits):
+                    create_targets.extend([repository] * deficits[repository])
                 available_slots = max(0, pool.max - len(pool_runners))
                 create_targets = create_targets[:available_slots]
-                floor_shortage = max(
-                    0,
-                    decision.target - len(pool_runners) - len(create_targets),
-                )
-                create_targets.extend(
-                    [anchor_repository]
-                    * min(floor_shortage, available_slots - len(create_targets))
-                )
             else:
+                decision = calculate_scale(
+                    pool,
+                    queued=queued.get(pool_name, 0),
+                    starting=starting,
+                    idle=idle,
+                    busy=busy,
+                    manual_floor=manual_total,
+                )
                 create_targets = [None] * decision.create
 
             for target_repository in create_targets:
@@ -383,38 +476,25 @@ class Scheduler:
 
             removal_count = max(0, len(pool_runners) - decision.target)
             removable: list[ManagedRunner] = []
-            if repository_bound and anchor_repository:
-                queued_by_repository = Counter(
-                    await self.demand.queued_repositories(pool_name)
-                )
+            if repository_bound:
                 starting_by_repository = Counter(
                     runner.repository
                     for runner in pool_runners
                     if runner.state == "starting" and runner.repository
                 )
-                busy_total = sum(runner.state == "busy" for runner in pool_runners)
-                floor = max(pool.min, manual.desired if manual else 0)
-                floor_extra = max(0, floor - busy_total - sum(queued_by_repository.values()))
-                spare_anchor_starting = max(
-                    0,
-                    starting_by_repository[anchor_repository]
-                    - queued_by_repository[anchor_repository],
-                )
-                floor_idle = max(0, floor_extra - spare_anchor_starting)
                 idle_allowance = {
                     repository: max(
                         0,
-                        queued - starting_by_repository[repository],
+                        desired
+                        - busy_by_repository[repository]
+                        - starting_by_repository[repository],
                     )
-                    for repository, queued in queued_by_repository.items()
+                    for repository, desired in desired_by_repository.items()
                 }
-                idle_allowance[anchor_repository] = (
-                    idle_allowance.get(anchor_repository, 0) + floor_idle
-                )
                 idle_repositories = {
-                    runner.repository or anchor_repository
+                    runner.repository
                     for runner in pool_runners
-                    if runner.state == "idle"
+                    if runner.state == "idle" and runner.repository
                 }
                 for repository in idle_repositories:
                     idle_runners = sorted(
@@ -422,7 +502,7 @@ class Scheduler:
                             runner
                             for runner in pool_runners
                             if runner.state == "idle"
-                            and (runner.repository or anchor_repository) == repository
+                            and runner.repository == repository
                             and runner.idle_since
                             and (now - runner.idle_since).total_seconds()
                             >= max(pool.idle_timeout, self.settings.assignment_grace_seconds)
@@ -481,7 +561,19 @@ class Scheduler:
         pools: dict[str, Any] = {}
         for name, config in self.settings.runner_pools.items():
             runners = [runner for runner in self._runners if runner.pool == name]
-            manual = self._manual.get(name)
+            pool_manual_floors = [
+                (repository, floor)
+                for (pool, repository), floor in self._manual.items()
+                if pool == name
+            ]
+            manual_floors = [
+                {
+                    "repository": repository,
+                    "desired": floor.desired,
+                    "expires_at": floor.expires_at.isoformat(),
+                }
+                for repository, floor in pool_manual_floors
+            ]
             pools[name] = {
                 "queued": queued.get(name, 0),
                 "starting": sum(runner.state == "starting" for runner in runners),
@@ -491,8 +583,12 @@ class Scheduler:
                 "max": config.max,
                 "labels": sorted(config.effective_labels),
                 "config": config.model_dump(mode="json"),
-                "manual_floor": manual.desired if manual else 0,
-                "manual_floor_expires_at": manual.expires_at.isoformat() if manual else None,
+                "manual_floor": sum(floor.desired for _, floor in pool_manual_floors),
+                "manual_floor_expires_at": min(
+                    (floor.expires_at.isoformat() for _, floor in pool_manual_floors),
+                    default=None,
+                ),
+                "manual_floors": manual_floors,
             }
         credentials = self.github.store.credentials()
         return {

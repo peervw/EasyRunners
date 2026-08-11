@@ -107,6 +107,10 @@ class ManagedRunner(BaseModel):
 class ScaleRequest(BaseModel):
     desired: int = Field(ge=0)
     ttl_seconds: int = Field(default=600, ge=30, le=86400)
+    repository: str | None = Field(
+        default=None,
+        pattern=r"^[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+$",
+    )
 
 
 class TokenCreateRequest(BaseModel):
@@ -119,12 +123,6 @@ class GitHubSetupRequest(BaseModel):
     repository: str | None = Field(default=None, pattern=r"^[A-Za-z0-9_.-]+$")
     app_owner_kind: Literal["user", "organization"] = "user"
     webhook_enabled: bool = True
-
-    @model_validator(mode="after")
-    def require_repository(self) -> GitHubSetupRequest:
-        if self.scope == GitHubScope.REPO and not self.repository:
-            raise ValueError("repository is required for repository scope")
-        return self
 
 
 class GitHubConnectRequest(BaseModel):

@@ -14,7 +14,11 @@ from runner_manager.scheduler import Scheduler
 class ConnectedStore:
     def credentials(self, *args, **kwargs):
         return SimpleNamespace(
-            connection=SimpleNamespace(scope=GitHubScope.REPO, target_name="peer/repo")
+            connection=SimpleNamespace(
+                scope=GitHubScope.REPO,
+                target_name="peer",
+                repository=None,
+            )
         )
 
 
@@ -48,6 +52,9 @@ class FakeGitHub:
 
     async def queued_jobs(self, repositories=None):
         return []
+
+    async def list_repositories(self):
+        return ["peer/one", "peer/repo", "peer/two"]
 
 
 class FakeDocker:
@@ -169,6 +176,27 @@ async def test_personal_installation_creates_repository_bound_runners(
     await scheduler.reconcile("webhook")
     assert github.token_repositories == ["peer/one", "peer/two"]
     assert docker.created_repositories == ["peer/one", "peer/two"]
+    database.close()
+
+
+@pytest.mark.asyncio
+async def test_manual_capacity_requires_and_targets_a_selected_repository(
+    settings, tmp_path: Path
+) -> None:
+    database = Database(tmp_path / "state.sqlite3")
+    demand = DemandTracker(settings.runner_pools, database)
+    github = FakeGitHub()
+    docker = FakeDocker()
+    scheduler = Scheduler(settings, github, docker, demand)
+    with pytest.raises(ValueError, match="repository is required"):
+        await scheduler.set_manual_floor("default", 1, 600)
+    with pytest.raises(ValueError, match="not selected"):
+        await scheduler.set_manual_floor("default", 1, 600, "peer/missing")
+    await scheduler.set_manual_floor("default", 1, 600, "PEER/TWO")
+    assert github.token_repositories == ["peer/two"]
+    assert docker.created_repositories == ["peer/two"]
+    status = await scheduler.status()
+    assert status["pools"]["default"]["manual_floors"][0]["repository"] == "peer/two"
     database.close()
 
 

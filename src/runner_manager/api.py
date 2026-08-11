@@ -346,7 +346,12 @@ async def api_scale(
     _: Annotated[AuthContext, Depends(require_mutation)],
 ) -> dict[str, Any]:
     try:
-        await _scheduler(request).set_manual_floor(pool, body.desired, body.ttl_seconds)
+        await _scheduler(request).set_manual_floor(
+            pool,
+            body.desired,
+            body.ttl_seconds,
+            body.repository,
+        )
     except KeyError as exc:
         raise HTTPException(status_code=404, detail="unknown pool") from exc
     except ValueError as exc:
@@ -414,13 +419,16 @@ async def api_test_runner(
     request: Request,
     _: Annotated[AuthContext, Depends(require_mutation)],
     pool: str | None = None,
+    repository: str | None = None,
 ) -> dict[str, Any]:
     if not _store(request).credentials():
         raise HTTPException(status_code=409, detail="complete the GitHub App installation first")
     try:
-        return await _scheduler(request).test_runner(pool)
+        return await _scheduler(request).test_runner(pool, repository)
     except KeyError as exc:
         raise HTTPException(status_code=404, detail="unknown pool") from exc
+    except ValueError as exc:
+        raise HTTPException(status_code=422, detail=str(exc)) from exc
 
 
 @router.get("/api/version")
@@ -449,6 +457,7 @@ async def api_workflow(
     pool: str,
     _: Annotated[AuthContext, Depends(require_auth)],
     template: str = "python",
+    repository: str | None = None,
 ) -> dict[str, Any]:
     config = _scheduler(request).settings.runner_pools.get(pool)
     if not config:
@@ -460,10 +469,21 @@ async def api_workflow(
     credentials = _store(request).credentials(require_installation=False)
     create_url = None
     if credentials and credentials.connection.scope == GitHubScope.REPO:
-        create_url = (
-            f"{_github(request).settings.github_web_url}/"
-            f"{credentials.connection.target_name}/actions/new"
+        selected = await _github(request).list_repositories()
+        requested = repository
+        if not requested and credentials.connection.repository:
+            requested = credentials.connection.target_name
+        match = next(
+            (item for item in selected if requested and item.lower() == requested.lower()),
+            None,
         )
+        if repository and not match:
+            raise HTTPException(
+                status_code=422,
+                detail="repository is not selected in the GitHub App installation",
+            )
+        if match:
+            create_url = f"{_github(request).settings.github_web_url}/{match}/actions/new"
     return {"filename": f"{template}.yml", "yaml": content, "create_url": create_url}
 
 

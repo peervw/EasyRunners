@@ -77,12 +77,12 @@ async def test_one_url_setup_detects_owner_kind_and_polling_mode(tmp_path) -> No
     client, _, database = make_stack(tmp_path, handler)
     setup = await client.resolve_setup(
         GitHubConnectRequest(
-            target_url="https://github.com/peervw/EasyRunners",
+            target_url="https://github.com/peervw",
             webhook_enabled=False,
         )
     )
     assert setup.owner == "peervw"
-    assert setup.repository == "EasyRunners"
+    assert setup.repository is None
     assert setup.app_owner_kind == "organization"
     assert setup.webhook_enabled is False
     assert client.build_manifest(setup)["hook_attributes"]["active"] is False
@@ -175,18 +175,57 @@ async def test_installation_repository_selection_is_saved(tmp_path, monkeypatch)
                 201,
                 json={"token": "ghs", "expires_at": "2099-01-01T00:00:00Z"},
             )
-        if request.url.path == "/repos/peer/repo":
-            return httpx.Response(200, json={"full_name": "peer/repo"})
+        if request.url.path == "/installation/repositories":
+            return httpx.Response(
+                200,
+                json={"repositories": [{"full_name": "peer/repo"}]},
+            )
         raise AssertionError(request.url)
 
     client, store, database = make_stack(tmp_path, handler)
     store.save_manifest_result(
-        GitHubSetupRequest(scope="repo", owner="peer", repository="repo"),
+        GitHubSetupRequest(scope="repo", owner="peer"),
         {"id": 12, "slug": "easy", "pem": "PRIVATE", "webhook_secret": "hook"},
     )
     monkeypatch.setattr(client.auth, "app_jwt", lambda *args: "jwt")
     await client.validate_installation(99)
     assert store.credentials().connection.repository_selection == "all"
+    await client.close()
+    database.close()
+
+
+@pytest.mark.asyncio
+async def test_account_installation_requires_at_least_one_repository(
+    tmp_path, monkeypatch
+) -> None:
+    def handler(request: httpx.Request) -> httpx.Response:
+        if request.url.path == "/app/installations/99":
+            return httpx.Response(
+                200,
+                json={
+                    "id": 99,
+                    "account": {"login": "peer"},
+                    "repository_selection": "selected",
+                },
+            )
+        if request.url.path == "/app/installations/99/access_tokens":
+            return httpx.Response(
+                201,
+                json={"token": "ghs", "expires_at": "2099-01-01T00:00:00Z"},
+            )
+        if request.url.path == "/installation/repositories":
+            return httpx.Response(200, json={"repositories": []})
+        raise AssertionError(request.url)
+
+    client, store, database = make_stack(tmp_path, handler)
+    store.save_manifest_result(
+        GitHubSetupRequest(scope="repo", owner="peer"),
+        {"id": 12, "slug": "easy", "pem": "PRIVATE", "webhook_secret": "hook"},
+    )
+    monkeypatch.setattr(client.auth, "app_jwt", lambda *args: "jwt")
+    with pytest.raises(ValueError, match="at least one repository"):
+        await client.validate_installation(99)
+    assert store.credentials(require_installation=False).connection.installation_id is None
     await client.close()
     database.close()
 

@@ -76,6 +76,8 @@ def test_login_dashboard_csrf_and_api_token(client) -> None:
     test_client, app = client
     _, csrf = login(test_client, app)
     assert test_client.get("/").status_code == 200
+    assert "GitHub account or organization URL" in test_client.get("/").text
+    assert "Advanced settings" in test_client.get("/").text
     assert test_client.post("/api/reconcile").status_code == 403
     response = test_client.post(
         "/api/auth/tokens",
@@ -125,14 +127,14 @@ def test_one_url_setup_and_callback_login_recovery(client, monkeypatch) -> None:
     _, csrf = login(test_client, app)
 
     async def resolve(setup):
-        assert setup.target_url == "https://github.com/peer/repo"
-        return GitHubSetupRequest(scope="repo", owner="peer", repository="repo")
+        assert setup.target_url == "https://github.com/peer"
+        return GitHubSetupRequest(scope="repo", owner="peer")
 
     monkeypatch.setattr(app.state.github, "resolve_setup", resolve)
     response = test_client.post(
         "/api/github/setup/manifest",
         headers={"X-CSRF-Token": csrf},
-        json={"target_url": "https://github.com/peer/repo"},
+        json={"target_url": "https://github.com/peer"},
     )
     assert response.status_code == 200
     test_client.cookies.clear()
@@ -185,7 +187,7 @@ def test_github_status_lists_selected_repositories(client, monkeypatch) -> None:
     test_client, app = client
     _, _ = login(test_client, app)
     app.state.github_store.save_manifest_result(
-        GitHubSetupRequest(scope="repo", owner="peer", repository="one"),
+        GitHubSetupRequest(scope="repo", owner="peer"),
         {"id": 1, "slug": "easy", "pem": "PRIVATE", "webhook_secret": "secret"},
     )
     app.state.github_store.save_installation(2, repository_selection="selected")
@@ -203,6 +205,40 @@ def test_github_status_lists_selected_repositories(client, monkeypatch) -> None:
     assert response.json()["repositories"] == ["peer/one", "peer/two"]
     assert response.json()["repository_bound"] is True
     assert response.json()["configure_url"].endswith("/settings/installations/2")
+    workflow = test_client.get(
+        "/api/pools/default/workflow?template=python&repository=peer/two"
+    )
+    assert workflow.status_code == 200
+    assert workflow.json()["create_url"] == "https://github.com/peer/two/actions/new"
+    assert (
+        test_client.get(
+            "/api/pools/default/workflow?template=python&repository=peer/missing"
+        ).status_code
+        == 422
+    )
+
+
+def test_runner_request_carries_repository_and_pool(client, monkeypatch) -> None:
+    test_client, app = client
+    _, csrf = login(test_client, app)
+    app.state.github_store.save_manifest_result(
+        GitHubSetupRequest(scope="repo", owner="peer"),
+        {"id": 1, "slug": "easy", "pem": "PRIVATE", "webhook_secret": "secret"},
+    )
+    app.state.github_store.save_installation(2, repository_selection="selected")
+
+    async def test_runner(pool=None, repository=None):
+        assert pool == "rust"
+        assert repository == "peer/two"
+        return {"pool": pool, "repository": repository}
+
+    monkeypatch.setattr(app.state.scheduler, "test_runner", test_runner)
+    response = test_client.post(
+        "/api/readiness/test-runner?pool=rust&repository=peer/two",
+        headers={"X-CSRF-Token": csrf},
+    )
+    assert response.status_code == 200
+    assert response.json() == {"pool": "rust", "repository": "peer/two"}
 
 
 def test_webhook_signature_replay_and_demand(client) -> None:

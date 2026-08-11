@@ -45,7 +45,9 @@ class GitHubConnection(BaseModel):
     def target_name(self) -> str:
         if self.scope == GitHubScope.ORG:
             return self.organization or self.owner
-        return f"{self.owner}/{self.repository}"
+        if self.repository:
+            return f"{self.owner}/{self.repository}"
+        return self.owner
 
 
 @dataclass(frozen=True)
@@ -390,12 +392,10 @@ class GitHubClient:
             scope = GitHubScope.ORG
             repository = None
         else:
-            if len(parts) < 2:
-                raise ValueError(
-                    "a repository URL is required unless organization-wide is selected"
-                )
             scope = GitHubScope.REPO
-            repository = parts[1].removesuffix(".git")
+            # Repository access is selected on GitHub's installation screen. A repository URL is
+            # accepted for convenience, but only its account owner is needed or persisted.
+            repository = None
         response = await self.http.get(
             f"{self.settings.github_api_url}/users/{owner}",
             headers={
@@ -446,17 +446,26 @@ class GitHubClient:
         self._installation_metadata_at = time.monotonic()
         if credentials.connection.scope == GitHubScope.REPO:
             try:
-                await self.request(
-                    "GET",
-                    f"/repos/{credentials.connection.target_name}",
-                    operation="validate_repository_access",
-                )
+                if credentials.connection.repository:
+                    await self.request(
+                        "GET",
+                        f"/repos/{credentials.connection.target_name}",
+                        operation="validate_repository_access",
+                    )
+                elif not await self.list_repositories(refresh=True):
+                    raise ValueError(
+                        "select at least one repository for the GitHub App installation"
+                    )
             except httpx.HTTPStatusError as exc:
                 self.store.save_installation(None)
                 self.auth.invalidate()
                 raise ValueError(
                     "the GitHub App was not granted access to the selected repository"
                 ) from exc
+            except ValueError:
+                self.store.save_installation(None)
+                self.auth.invalidate()
+                raise
         return installation
 
     def _target_path(self, suffix: str, repository: str | None = None) -> str:
