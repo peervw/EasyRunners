@@ -373,7 +373,7 @@ async def api_readiness(
     docker_ok = await request.app.state.docker.ping()
     images: dict[str, bool] = {}
     for name, pool in settings.runner_pools.items():
-        image = pool.image or settings.runner_image
+        image = settings.image_for_pool(pool)
         images[name] = await request.app.state.docker.image_exists(image)
     scheduler_status = await _scheduler(request).status()
     github_ok = installed and scheduler_status["github"] == "connected"

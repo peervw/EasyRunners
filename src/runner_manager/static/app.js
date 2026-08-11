@@ -143,6 +143,7 @@ function fillPool(name = 'default', config = null) {
   form.max.value = value.max;
   form.cpu.value = value.cpu;
   form.memory.value = value.memory;
+  form.image.value = value.image || '';
   form.docker_mode.value = value.docker_mode;
   form.scrollIntoView({behavior: 'smooth', block: 'center'});
 }
@@ -224,12 +225,17 @@ document.querySelector('#pool-form')?.addEventListener('submit', async event => 
   const body = {...current,
     labels: form.labels.value.split(',').map(value => value.trim()).filter(Boolean),
     min: Number(form.min.value), max: Number(form.max.value), cpu: Number(form.cpu.value),
-    memory: form.memory.value, docker_mode: form.docker_mode.value,
+    memory: form.memory.value, image: form.image.value || null,
+    docker_mode: form.docker_mode.value,
   };
   const result = await action(() => json(`/api/pools/${encodeURIComponent(name)}`, {method: 'PUT', headers, body: JSON.stringify(body)}), 'Pool saved.');
   if (result) refresh();
 });
 document.querySelector('#new-pool')?.addEventListener('click', () => fillPool('new-pool'));
+document.querySelector('#rust-pool')?.addEventListener('click', () => fillPool('rust', {
+  labels: ['self-hosted', 'linux', 'x64', 'rust'], min: 0, max: 5,
+  cpu: 4, memory: '8g', image: null, docker_mode: 'none',
+}));
 document.querySelector('#export-pools')?.addEventListener('click', async () => {
   await action(async () => {
     const response = await fetch('/api/pools/config.yaml');

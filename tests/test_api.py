@@ -158,6 +158,10 @@ def test_pool_crud_yaml_workflow_and_readiness(client) -> None:
     workflow = test_client.get("/api/pools/build/workflow?template=python")
     assert workflow.status_code == 200
     assert "runs-on: [self-hosted, linux, x64, build]" in workflow.json()["yaml"]
+    rust_workflow = test_client.get("/api/pools/build/workflow?template=rust")
+    assert rust_workflow.status_code == 200
+    assert "Swatinem/rust-cache@49a0bdc" in rust_workflow.json()["yaml"]
+    assert "cargo clippy" in rust_workflow.json()["yaml"]
     readiness = test_client.get("/api/readiness").json()
     assert readiness["checks"]["docker"]["ok"] is True
     assert readiness["checks"]["runner_images"]["ok"] is True

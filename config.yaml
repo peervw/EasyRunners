@@ -12,7 +12,6 @@ runner_pools:
     min: 0
     max: 5
     priority: 0
-    image: easy-runners-runner:latest
     cpu: 4
     memory: 8g
     pids_limit: 1024
@@ -20,6 +19,20 @@ runner_pools:
     job_timeout: 3600
     max_lifetime: 3900
     docker_mode: socket
+
+  # Rust jobs use a larger image with the toolchain and native build dependencies preinstalled.
+  rust:
+    labels: [self-hosted, linux, x64, rust]
+    min: 0
+    max: 5
+    priority: 10
+    cpu: 4
+    memory: 8g
+    pids_limit: 1024
+    idle_timeout: 60
+    job_timeout: 3600
+    max_lifetime: 3900
+    docker_mode: none
 
   # Keep deploy credentials and mounts out of the default CI pool.
   # deploy:
@@ -31,4 +44,3 @@ runner_pools:
   #   memory: 4g
   #   docker_mode: none
   #   environment_from: [DEPLOY_TOKEN]
-

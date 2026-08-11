@@ -6,10 +6,17 @@ services:
     entrypoint: ["/bin/true"]
     restart: "no"
 
+  rust-runner-image:
+    image: ${RUST_RUNNER_IMAGE:-ghcr.io/peervw/easy-runners-runner-rust:latest}
+    entrypoint: ["/bin/true"]
+    restart: "no"
+
   manager:
     image: ${MANAGER_IMAGE:-ghcr.io/peervw/easy-runners-manager:latest}
     depends_on:
       runner-image:
+        condition: service_completed_successfully
+      rust-runner-image:
         condition: service_completed_successfully
     env_file:
       - path: .env
@@ -22,6 +29,7 @@ services:
       DOCKER_SOCKET_PATH: /var/run/docker.sock
       RUNNER_NETWORK: easy-runners
       RUNNER_IMAGE: ${RUNNER_IMAGE:-ghcr.io/peervw/easy-runners-runner:latest}
+      RUST_RUNNER_IMAGE: ${RUST_RUNNER_IMAGE:-ghcr.io/peervw/easy-runners-runner-rust:latest}
     ports:
       - "${MANAGER_BIND_ADDRESS:-127.0.0.1}:${MANAGER_PORT:-8080}:8080"
     volumes:

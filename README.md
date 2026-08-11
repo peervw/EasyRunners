@@ -152,6 +152,15 @@ runner_pools:
     max_lifetime: 3900
     docker_mode: socket
 
+  rust:
+    labels: [self-hosted, linux, x64, rust]
+    min: 0
+    max: 5
+    priority: 10
+    cpu: 4
+    memory: 8g
+    docker_mode: none
+
   deploy:
     labels: [self-hosted, linux, x64, deploy]
     min: 0
@@ -174,9 +183,47 @@ Use a pool with:
 runs-on: [self-hosted, linux, x64, docker]
 ```
 
-See [Python CI](examples/python-ci.yaml), [GHCR build](examples/docker-ghcr.yaml), and
-[deployment](examples/deploy.yaml) examples. The dashboard generator creates equivalent
-copy-paste-ready workflows for Python, Node, Docker, and isolated deploy pools.
+See [Python CI](examples/python-ci.yaml), [Rust CI](examples/rust-ci.yaml),
+[GHCR build](examples/docker-ghcr.yaml), and [deployment](examples/deploy.yaml) examples. The
+dashboard generator creates equivalent copy-paste-ready workflows for Python, Node, Rust, Docker,
+and isolated deploy pools.
+
+### Rust runners and caching
+
+The `rust` label automatically selects `RUST_RUNNER_IMAGE`. That dedicated image inherits the
+official ephemeral runner and adds rustup, the stable minimal Rust toolchain, Clippy, rustfmt,
+`clang`, `lld`, CMake, OpenSSL headers, `pkg-config`, and Protobuf. Its larger layers remain cached
+on the Docker host and do not need to be downloaded for each ephemeral container.
+
+Rust workflows use GitHub's remote Actions cache through `Swatinem/rust-cache`, pinned to an
+immutable commit. It keys Cargo downloads and dependency build artifacts using the compiler,
+Cargo manifests and lockfiles, toolchain files, and relevant build environment. No Cargo directory
+is shared directly between repositories or runner containers.
+
+Set `RUST_TOOLCHAIN` before building the images to bake a specific channel or version instead of
+`stable`. A repository-level `rust-toolchain.toml` remains the source of truth; when it asks for a
+toolchain not present in the image, install that toolchain in the workflow or rebuild the Rust image
+with the same pin.
+
+For an existing installation whose dashboard pool configuration already overrides `config.yaml`,
+click **Rust preset**, review the capacity, and save it. For a new installation the `rust` pool is
+present automatically with `min: 0`, so it consumes no runner capacity until a matching job queues.
+
+### Connect a Rust repository
+
+1. In EasyRunners, connect or reconnect the GitHub App using the repository URL, for example
+   `https://github.com/peervw/prediction-market`. Ensure that repository is selected during App
+   installation.
+2. Confirm that the dashboard readiness check finds the Rust image and that the `rust` pool appears.
+3. In the target repository, copy `examples/rust-ci.yaml` to `.github/workflows/rust-ci.yml`, or use
+   **Create a workflow → Rust CI** in the dashboard.
+4. Commit and push the workflow. A job requesting
+   `[self-hosted, linux, x64, rust]` queues, EasyRunners starts one ephemeral Rust container, and the
+   container disappears after the job.
+
+The generated workflow assumes a committed `Cargo.lock` and a workspace compatible with
+`--all-features`. Remove `--locked`, `--workspace`, or `--all-features` if the repository intentionally
+uses a different layout.
 
 ### Scaling behavior
 
@@ -265,10 +312,10 @@ every ephemeral container. To update it, change `RUNNER_VERSION`, `RUNNER_SHA256
 a progressive rollout, so verify the expected version in the repository or organization's **Add new
 self-hosted runner** page before updating.
 
-Tag pushes run `.github/workflows/release-images.yml`, producing amd64/arm64 manager and runner
-images in GHCR with SBOMs, provenance attestations, and keyless Cosign signatures. Change the image
-namespace in `compose.prebuilt.yaml` when publishing from a fork. That workflow must run once before
-the prebuilt path exists in a new registry.
+Tag pushes run `.github/workflows/release-images.yml`, producing amd64/arm64 manager, base-runner,
+and Rust-runner images in GHCR with SBOMs, provenance attestations, and keyless Cosign signatures.
+Change the image namespace in `compose.prebuilt.yaml` when publishing from a fork. That workflow
+must run once before the prebuilt path exists in a new registry.
 
 ## Backup and restore
 

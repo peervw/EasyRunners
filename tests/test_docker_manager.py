@@ -91,6 +91,19 @@ async def test_create_runner_applies_security_and_resources(settings) -> None:
 
 
 @pytest.mark.asyncio
+async def test_rust_pool_uses_rust_image(settings) -> None:
+    client = FakeClient()
+    manager = DockerRunnerManager(settings, client)
+    await manager.create_runner(
+        "rust",
+        RunnerPoolConfig(labels=["rust"], docker_mode="none"),
+        "token",
+        "https://github.com/o/r",
+    )
+    assert client.containers.kwargs["image"] == settings.rust_runner_image
+
+
+@pytest.mark.asyncio
 async def test_socket_mode_mounts_socket_and_host_gid(settings, monkeypatch) -> None:
     socket_path = Path("/var/run/test-docker.sock")
     socket_stat = SimpleNamespace(st_mode=stat.S_IFSOCK | 0o660, st_gid=123)

@@ -69,7 +69,7 @@
 
       <section><div class="section-heading"><h2>Runner pools</h2><span id="updated" class="muted"></span></div><div id="pools" class="card-grid"></div></section>
       <section class="panel">
-        <div class="section-heading"><h2>Add or edit a pool</h2><button id="new-pool" class="secondary compact">New</button></div>
+        <div class="section-heading"><h2>Add or edit a pool</h2><div class="actions"><button id="rust-pool" class="secondary compact">Rust preset</button><button id="new-pool" class="secondary compact">New</button></div></div>
         <form id="pool-form" class="setup-grid">
           <label>Name<input name="pool_name" value="default" pattern="[A-Za-z0-9_.-]+" required></label>
           <label>Labels<input name="labels" value="self-hosted,linux,x64,docker" required></label>
@@ -77,6 +77,7 @@
           <label>Maximum<input name="max" type="number" min="0" value="5" required></label>
           <label>CPU cores<input name="cpu" type="number" min="0.1" step="0.1" value="4" required></label>
           <label>Memory<input name="memory" value="8g" required></label>
+          <label>Runner image<input name="image" placeholder="Blank uses the label preset"></label>
           <label>Docker access<select name="docker_mode"><option value="socket">Docker socket</option><option value="none">No Docker</option></select></label>
           <button>Save pool</button>
         </form>
@@ -90,7 +91,7 @@
         <div class="section-heading"><h2>Create a workflow</h2><span class="muted">Copy-paste ready</span></div>
         <form id="workflow-form" class="inline-form">
           <select name="pool" id="workflow-pool"></select>
-          <select name="template"><option value="python">Python CI</option><option value="node">Node CI</option><option value="docker">Docker build</option><option value="deploy">Deploy</option></select>
+          <select name="template"><option value="python">Python CI</option><option value="node">Node CI</option><option value="rust">Rust CI</option><option value="docker">Docker build</option><option value="deploy">Deploy</option></select>
           <button>Generate</button>
         </form>
         <textarea id="workflow-yaml" class="code-editor" readonly spellcheck="false" placeholder="Choose a pool and generate a workflow."></textarea>

@@ -109,7 +109,7 @@ class DockerRunnerManager:
         runner_id = uuid.uuid4().hex
         name = f"er-{self.settings.instance_id}-{pool_name}-{runner_id[:8]}"[:64]
         now = datetime.now(UTC)
-        image = pool.image or self.settings.runner_image
+        image = self.settings.image_for_pool(pool)
         environment = {
             "RUNNER_NAME": name,
             "RUNNER_URL": target_url,
