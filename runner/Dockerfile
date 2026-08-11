@@ -7,8 +7,8 @@ ARG RUNNER_SHA256_ARM64=58b758e420b87093fbd4bfddd368074960053e2f1388f01848c82624
 ARG TARGETARCH
 
 ENV DEBIAN_FRONTEND=noninteractive
-RUN --mount=type=cache,target=/var/cache/apt \
-    --mount=type=cache,target=/var/lib/apt \
+RUN --mount=type=cache,id=easyrunners-runner-apt-cache,target=/var/cache/apt,sharing=locked \
+    --mount=type=cache,id=easyrunners-runner-apt-lists,target=/var/lib/apt,sharing=locked \
     apt-get update && apt-get install -y --no-install-recommends \
       bash build-essential ca-certificates curl docker.io git jq \
       libicu74 libssl3 python3 python3-pip python3-venv sudo tar unzip zip \
@@ -43,8 +43,8 @@ ENTRYPOINT ["/entrypoint.sh"]
 FROM base AS rust
 
 USER root
-RUN --mount=type=cache,target=/var/cache/apt \
-    --mount=type=cache,target=/var/lib/apt \
+RUN --mount=type=cache,id=easyrunners-runner-apt-cache,target=/var/cache/apt,sharing=locked \
+    --mount=type=cache,id=easyrunners-runner-apt-lists,target=/var/lib/apt,sharing=locked \
     apt-get update && apt-get install -y --no-install-recommends \
       clang cmake libssl-dev lld pkg-config protobuf-compiler \
     && rm -rf /var/lib/apt/lists/*
