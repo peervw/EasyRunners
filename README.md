@@ -1,33 +1,23 @@
 # EasyRunners
 
-EasyRunners is a small, self-hosted control plane for **ephemeral official GitHub Actions
-runners**. It runs on an ordinary Linux Docker host—no Kubernetes, database server, queue, or fake
-CI engine. GitHub remains responsible for workflows, scheduling, logs, secrets, and job results;
-EasyRunners supplies fresh Docker runner capacity and removes it after one job.
+**Self-hosted GitHub Actions runners without turning runner management into an infrastructure
+project.**
 
-## How it works
+Go from a fresh Docker host to automatically scaled, ephemeral runners in minutes: start one
+Compose stack, connect GitHub in the dashboard, and change one `runs-on` line. EasyRunners takes it
+from there.
 
-```text
-workflow_job queued webhook        periodic REST reconciliation
-              │                                  │
-              └──────────────┬───────────────────┘
-                             ▼
-                    per-pool scheduler
-                             │
-            short-lived registration token from GitHub
-                             │
-                             ▼
-       official actions/runner container --ephemeral
-                             │
-                 exactly one GitHub Actions job
-                             │
-                             ▼
-          automatic de-registration + container removal
-```
+- **One-command deployment:** one source-built Compose file and one persistent data volume.
+- **Click-through GitHub setup:** EasyRunners creates and configures the private GitHub App for you.
+- **Scale to zero:** a matching job starts a runner; the container disappears when the job ends.
+- **Fresh jobs:** every job gets a clean container filesystem and workspace.
+- **Multi-repository:** one installation can serve every trusted repository selected in GitHub.
+- **Batteries included:** one universal Linux image covers Docker, Python, Rust, and common build
+  tooling; setup actions handle any other language or version.
+- **Small control plane:** no Kubernetes, external database, queue, or registry login required.
 
-Every runner receives a new container filesystem and `_work` directory. Runner registration tokens
-are requested just in time, never stored, and never written to logs. Containers are labeled so the
-manager can adopt or clean them after a restart. See [the architecture decision](docs/ARCHITECTURE.md).
+GitHub still owns workflows, scheduling, logs, secrets, and results. EasyRunners only supplies fresh
+official runner capacity exactly when it is needed.
 
 ## Requirements
 
@@ -39,9 +29,9 @@ manager can adopt or clean them after a restart. See [the architecture decision]
 Downloading and configuring GitHub's runner means accepting the applicable
 [GitHub Customer Agreement](https://github.com/customer-terms).
 
-## Quick start
+## Quick start: running in minutes
 
-### 1. Run Compose
+### 1. Start EasyRunners
 
 ```bash
 git clone https://github.com/peervw/EasyRunners.git easy-runners
@@ -51,14 +41,14 @@ docker compose up -d --build
 docker compose logs manager
 ```
 
-That is the only Compose file. It always builds the manager, standard runner, and Rust runner from
-the checked-out commit. No container registry login or separately published images are required.
+That is the entire deployment. Compose builds the manager and one universal runner image from the
+checked-out commit. No container registry login, image publishing, or extra service is required.
 
 In Dokploy, choose `compose.yaml`, set `PUBLIC_URL` in the environment, and deploy. The Compose file
 already declares the persistent data volume and Docker socket; do not add another volume in the
 advanced settings. Route the public HTTPS domain to the `manager` service on port 8080.
 
-### 2. Connect GitHub
+### 2. Connect GitHub in the dashboard
 
 The first boot prints an `auth.bootstrap_password` JSON event exactly once. Open `PUBLIC_URL`, sign
 in with that password, and replace it with a password of at least 14 characters. Paste the account
@@ -75,7 +65,7 @@ cannot run on a runner registered to repository B. One App installation can stil
 repository selected on GitHub. For organizations, the optional shared-runner mode registers at the
 organization level and should be restricted with GitHub runner groups.
 
-### 3. Change one workflow line
+### 3. Change one workflow line and push
 
 In each existing workflow job, replace its hosted runner line:
 
@@ -94,6 +84,8 @@ Push the change. The dashboard shows the job as queued, creates a fresh runner f
 shows it as busy, and removes its container and workspace when the job finishes. The dashboard's
 **Use an existing workflow** section generates the exact line for every configured pool and diagnoses
 jobs whose labels do not match a pool.
+
+That's it—future matching jobs scale up and clean themselves up automatically.
 
 If login expires or the browser is closed during setup, sign in again and use **Continue GitHub
 installation**. **Start over** clears the local connection; remove an abandoned App separately in
@@ -123,6 +115,31 @@ docker compose exec manager easyrunners admin reset-password
 
 The command invalidates all sessions and prints a new one-time password.
 
+## What happens when a job queues
+
+```text
+workflow_job queued webhook        periodic REST reconciliation
+              │                                  │
+              └──────────────┬───────────────────┘
+                             ▼
+                    per-pool scheduler
+                             │
+            short-lived registration token from GitHub
+                             │
+                             ▼
+       official actions/runner container --ephemeral
+                             │
+                 exactly one GitHub Actions job
+                             │
+                             ▼
+          automatic de-registration + container removal
+```
+
+Every runner receives a new container filesystem and `_work` directory. Registration tokens are
+requested just in time, never stored, and never written to logs. Containers are labeled so the
+manager can adopt or clean them after a restart. See
+[the architecture decision](docs/ARCHITECTURE.md) for the deeper design.
+
 ## GitHub permissions
 
 The manifest requests only the permissions required by the selected scope:
@@ -151,12 +168,20 @@ For development only, set `GITHUB_AUTH_MODE=pat` and `GITHUB_TOKEN`. Classic PAT
 private repositories or `admin:org` for organization runners. GitHub Apps are recommended because
 their installation tokens are short-lived and repository access is explicit.
 
-## Runner pools and labels
+## One image, as many pools as you need
 
-Image defaults live in `config.yaml`; secrets remain in the environment or protected data volume.
-Pools can also be added and edited in the dashboard or imported/exported as YAML. Dashboard
-overrides persist in `/data` and take precedence after restart. A pool is an independently bounded
-capacity class:
+All built-in pools use the same universal runner image. Pools are lightweight scheduling and
+security boundaries—not separate language images. Use them when jobs need different labels,
+capacity, resource limits, credentials, or Docker access. Specify `image` on an individual pool only
+when a genuinely custom environment is required.
+
+The universal image is somewhat larger than a language-minimal image, but a self-hosted Docker host
+builds and stores it once. In return, deployment has one image lifecycle, warm local layers, and no
+label-to-image surprises.
+
+Defaults live in `config.yaml`; secrets remain in the environment or protected data volume. Pools
+can also be edited in the dashboard or imported/exported as YAML. Dashboard overrides persist in
+`/data` and take precedence after restart:
 
 ```yaml
 runner_pools:
@@ -206,22 +231,25 @@ See [Python CI](examples/python-ci.yaml), [Rust CI](examples/rust-ci.yaml),
 dashboard generator creates equivalent copy-paste-ready workflows for Python, Node, Rust, Docker,
 and isolated deploy pools.
 
-### Rust runners and caching
+### Fast Rust jobs without a second image
 
-The `rust` label automatically selects `RUST_RUNNER_IMAGE`. That dedicated image inherits the
-official ephemeral runner and adds rustup, the stable minimal Rust toolchain, Clippy, rustfmt,
-`clang`, `lld`, CMake, OpenSSL headers, `pkg-config`, and Protobuf. Its larger layers remain cached
-on the Docker host and do not need to be downloaded for each ephemeral container.
+The universal image includes rustup, the stable minimal Rust toolchain, Clippy, rustfmt, `clang`,
+`lld`, CMake, OpenSSL headers, `pkg-config`, and Protobuf. Compose builds and stores that image once;
+every ephemeral runner reuses its local read-only layers, so a Rust pool does not require another
+build or image download.
+
+The `rust` pool remains useful, but only as a label, capacity, and security boundary. By default it
+does not receive the Docker socket, while the `docker` pool does. Both launch the same image.
 
 Rust workflows use GitHub's remote Actions cache through `Swatinem/rust-cache`, pinned to an
 immutable commit. It keys Cargo downloads and dependency build artifacts using the compiler,
 Cargo manifests and lockfiles, toolchain files, and relevant build environment. No Cargo directory
 is shared directly between repositories or runner containers.
 
-Set `RUST_TOOLCHAIN` before building the images to bake a specific channel or version instead of
+Set `RUST_TOOLCHAIN` before building the image to bake a specific channel or version instead of
 `stable`. A repository-level `rust-toolchain.toml` remains the source of truth; when it asks for a
-toolchain not present in the image, install that toolchain in the workflow or rebuild the Rust image
-with the same pin.
+toolchain not present in the image, install that toolchain in the workflow or rebuild the universal
+image with the same pin.
 
 For an existing installation whose dashboard pool configuration already overrides `config.yaml`,
 click **Rust preset**, review the capacity, and save it. For a new installation the `rust` pool is
@@ -231,11 +259,11 @@ present automatically with `min: 0`, so it consumes no runner capacity until a m
 
 1. In the GitHub App installation, ensure the Rust repository is selected. Reconnecting EasyRunners
    is not necessary when adding another repository to the same installation.
-2. Confirm that the dashboard readiness check finds the Rust image and that the `rust` pool appears.
+2. Confirm that the dashboard readiness check finds the runner image and that the `rust` pool appears.
 3. In the target repository, copy `examples/rust-ci.yaml` to `.github/workflows/rust-ci.yml`, or copy
    the Rust `runs-on` line from the dashboard.
 4. Commit and push the workflow. A job requesting
-   `[self-hosted, linux, x64, rust]` queues, EasyRunners starts one ephemeral Rust container, and the
+   `[self-hosted, linux, x64, rust]` queues, EasyRunners starts one ephemeral runner container, and the
    container disappears after the job.
 
 The generated workflow assumes a committed `Cargo.lock` and a workspace compatible with

@@ -42,10 +42,17 @@ def test_one_compose_builds_every_image_from_source() -> None:
     assert not (REPOSITORY_ROOT / "compose.prebuilt.yaml").exists()
     compose = yaml.safe_load((REPOSITORY_ROOT / "compose.yaml").read_text())
     services = compose["services"]
-    for name in ("manager", "runner-image", "rust-runner-image"):
+    for name in ("manager", "runner-image"):
         assert services[name]["build"]
         assert services[name]["image"].startswith("${")
         assert "easy-runners-" in services[name]["image"]
+    assert "rust-runner-image" not in services
+    assert services["runner-image"]["build"]["target"] == "runner"
+    assert "RUST_TOOLCHAIN" in services["runner-image"]["build"]["args"]
+    assert set(services["manager"]["depends_on"]) == {"runner-image"}
+    runner_dockerfile = (REPOSITORY_ROOT / "runner" / "Dockerfile").read_text()
+    assert len(re.findall(r"^FROM ", runner_dockerfile, flags=re.MULTILINE)) == 1
+    assert "rustup toolchain install" in runner_dockerfile
     manager_volumes = services["manager"]["volumes"]
     assert "easy-runners-data:/data" in manager_volumes
     assert all(not volume.startswith("./") for volume in manager_volumes)

@@ -6,20 +6,7 @@ services:
     build:
       context: .
       dockerfile: runner/Dockerfile
-      target: base
-      args:
-        RUNNER_VERSION: ${RUNNER_VERSION:-2.336.0}
-        RUNNER_SHA256_X64: ${RUNNER_SHA256_X64:-04cf0be1aff4c3ec3554466c39124ca250e3effd8873bb7e8d68535aa9505d5d}
-        RUNNER_SHA256_ARM64: ${RUNNER_SHA256_ARM64:-58b758e420b87093fbd4bfddd368074960053e2f1388f01848c82624b90f27d1}
-    entrypoint: ["/bin/true"]
-    restart: "no"
-
-  rust-runner-image:
-    image: ${RUST_RUNNER_IMAGE:-easy-runners-runner-rust:latest}
-    build:
-      context: .
-      dockerfile: runner/Dockerfile
-      target: rust
+      target: runner
       args:
         RUNNER_VERSION: ${RUNNER_VERSION:-2.336.0}
         RUNNER_SHA256_X64: ${RUNNER_SHA256_X64:-04cf0be1aff4c3ec3554466c39124ca250e3effd8873bb7e8d68535aa9505d5d}
@@ -37,8 +24,6 @@ services:
     depends_on:
       runner-image:
         condition: service_completed_successfully
-      rust-runner-image:
-        condition: service_completed_successfully
     env_file:
       - path: .env
         required: false
@@ -51,7 +36,6 @@ services:
       DOCKER_SOCKET_PATH: /var/run/docker.sock
       RUNNER_NETWORK: easy-runners
       RUNNER_IMAGE: ${RUNNER_IMAGE:-easy-runners-runner:latest}
-      RUST_RUNNER_IMAGE: ${RUST_RUNNER_IMAGE:-easy-runners-runner-rust:latest}
     ports:
       - "${MANAGER_BIND_ADDRESS:-127.0.0.1}:${MANAGER_PORT:-8080}:8080"
     volumes:

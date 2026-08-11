@@ -20,7 +20,7 @@ runner_pools:
     max_lifetime: 3900
     docker_mode: socket
 
-  # Rust jobs use a larger image with the toolchain and native build dependencies preinstalled.
+  # Rust uses the same universal image. A separate pool keeps non-Docker jobs away from the socket.
   rust:
     labels: [self-hosted, linux, x64, rust]
     min: 0

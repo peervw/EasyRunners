@@ -95,7 +95,7 @@ async def test_create_runner_applies_security_and_resources(settings) -> None:
 
 
 @pytest.mark.asyncio
-async def test_rust_pool_uses_rust_image(settings) -> None:
+async def test_rust_pool_uses_universal_image(settings) -> None:
     client = FakeClient()
     manager = DockerRunnerManager(settings, client)
     await manager.create_runner(
@@ -104,7 +104,7 @@ async def test_rust_pool_uses_rust_image(settings) -> None:
         "token",
         "https://github.com/o/r",
     )
-    assert client.containers.kwargs["image"] == settings.rust_runner_image
+    assert client.containers.kwargs["image"] == settings.runner_image
 
 
 @pytest.mark.asyncio
