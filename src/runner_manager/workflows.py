@@ -25,6 +25,18 @@ def workflow_for(pool_name: str, pool: RunnerPoolConfig, template: str) -> str:
       - uses: docker/setup-buildx-action@v3
       - run: docker build -t my-app:${{ github.sha }} .
 """,
+        "rust": """      - uses: actions/checkout@v4
+      - name: Toolchain information
+        run: rustc --version --verbose && cargo --version
+      - name: Restore Cargo cache
+        uses: Swatinem/rust-cache@49a0bdc70d2e1b713ca9e2869b211fcce03d3c1c # v2
+      - name: Check formatting
+        run: cargo fmt --all -- --check
+      - name: Run Clippy
+        run: cargo clippy --workspace --all-targets --all-features --locked -- -D warnings
+      - name: Run tests
+        run: cargo test --workspace --all-features --locked
+""",
         "deploy": """      - uses: actions/checkout@v4
       - name: Deploy
         run: ./scripts/deploy.sh
@@ -33,6 +45,11 @@ def workflow_for(pool_name: str, pool: RunnerPoolConfig, template: str) -> str:
     if template not in jobs:
         raise KeyError(template)
     environment = "    environment: production\n" if template == "deploy" else ""
+    job_environment = (
+        "    env:\n      CARGO_TERM_COLOR: always\n      RUST_BACKTRACE: '1'\n"
+        if template == "rust"
+        else ""
+    )
     return (
         f"name: {template.title()} on EasyRunners\n\n"
         "on:\n  workflow_dispatch:\n  push:\n    branches: [main]\n\n"
@@ -41,6 +58,7 @@ def workflow_for(pool_name: str, pool: RunnerPoolConfig, template: str) -> str:
         f"    runs-on: [{labels}]\n"
         f"    timeout-minutes: {max(1, pool.job_timeout // 60)}\n"
         f"{environment}"
+        f"{job_environment}"
         "    steps:\n"
         f"{jobs[template]}"
     )

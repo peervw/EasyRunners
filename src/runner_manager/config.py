@@ -65,6 +65,7 @@ class Settings(BaseSettings):
     docker_host: str = "unix:///var/run/docker.sock"
     runner_network: str | None = "easy-runners"
     runner_image: str = "easy-runners-runner:latest"
+    rust_runner_image: str = "easy-runners-runner-rust:latest"
     runner_version: str = "2.336.0"
     docker_socket_path: Path = Path("/var/run/docker.sock")
 
@@ -107,6 +108,13 @@ class Settings(BaseSettings):
     def assert_production_safe(self) -> None:
         if not self.allow_insecure_public_url and not self.public_url.startswith("https://"):
             raise ValueError("PUBLIC_URL must use HTTPS (or set ALLOW_INSECURE_PUBLIC_URL=true)")
+
+    def image_for_pool(self, pool: RunnerPoolConfig) -> str:
+        if pool.image:
+            return pool.image
+        if "rust" in pool.custom_labels:
+            return self.rust_runner_image
+        return self.runner_image
 
 
 def _apply_yaml(settings: Settings, raw: dict[str, Any]) -> Settings:

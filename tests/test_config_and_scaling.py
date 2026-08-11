@@ -15,6 +15,15 @@ def test_pool_normalizes_effective_and_custom_labels() -> None:
     assert pool.custom_labels == ["docker"]
 
 
+def test_rust_label_selects_dedicated_image(settings) -> None:
+    rust = RunnerPoolConfig(labels=["rust"], docker_mode="none")
+    base = RunnerPoolConfig(labels=["docker"], docker_mode="none")
+    custom = rust.model_copy(update={"image": "registry.example/custom-rust:1"})
+    assert settings.image_for_pool(rust) == "easy-runners-runner-rust:latest"
+    assert settings.image_for_pool(base) == settings.runner_image
+    assert settings.image_for_pool(custom) == "registry.example/custom-rust:1"
+
+
 def test_pool_rejects_invalid_limits() -> None:
     with pytest.raises(ValidationError, match="min must not exceed max"):
         RunnerPoolConfig(min=3, max=2)

@@ -24,7 +24,11 @@ jobs:
           - component: runner
             image: easy-runners-runner
             file: runner/Dockerfile
-            target: ""
+            target: base
+          - component: runner-rust
+            image: easy-runners-runner-rust
+            file: runner/Dockerfile
+            target: rust
     steps:
       - uses: actions/checkout@v4
       - uses: docker/setup-qemu-action@v3

@@ -1,5 +1,5 @@
 # syntax=docker/dockerfile:1.7
-FROM ubuntu:24.04
+FROM ubuntu:24.04 AS base
 
 ARG RUNNER_VERSION=2.336.0
 ARG RUNNER_SHA256_X64=04cf0be1aff4c3ec3554466c39124ca250e3effd8873bb7e8d68535aa9505d5d
@@ -39,3 +39,27 @@ COPY runner/entrypoint.sh /entrypoint.sh
 RUN chmod 0755 /entrypoint.sh
 USER 1001:1001
 ENTRYPOINT ["/entrypoint.sh"]
+
+FROM base AS rust
+
+USER root
+RUN --mount=type=cache,target=/var/cache/apt \
+    --mount=type=cache,target=/var/lib/apt \
+    apt-get update && apt-get install -y --no-install-recommends \
+      clang cmake libssl-dev lld pkg-config protobuf-compiler \
+    && rm -rf /var/lib/apt/lists/*
+
+ARG RUST_TOOLCHAIN=stable
+ENV CARGO_HOME=/home/runner/.cargo \
+    RUSTUP_HOME=/home/runner/.rustup \
+    PATH=/home/runner/.cargo/bin:${PATH}
+USER 1001:1001
+RUN curl --proto '=https' --tlsv1.2 --fail --silent --show-error \
+      https://sh.rustup.rs --output /tmp/rustup-init.sh \
+    && sh /tmp/rustup-init.sh -y --no-modify-path --profile minimal --default-toolchain none \
+    && rm /tmp/rustup-init.sh \
+    && rustup toolchain install "${RUST_TOOLCHAIN}" --profile minimal \
+      --component clippy --component rustfmt \
+    && rustup default "${RUST_TOOLCHAIN}" \
+    && rustc --version \
+    && cargo --version
