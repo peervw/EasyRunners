@@ -2,7 +2,7 @@ name: easy-runners
 
 services:
   runner-image:
-    image: ${RUNNER_IMAGE:-easy-runners-runner:latest}
+    image: ${RUNNER_IMAGE:-ghcr.io/peervw/easy-runners-runner:latest}
     build:
       context: .
       dockerfile: runner/Dockerfile
@@ -15,7 +15,7 @@ services:
     restart: "no"
 
   rust-runner-image:
-    image: ${RUST_RUNNER_IMAGE:-easy-runners-runner-rust:latest}
+    image: ${RUST_RUNNER_IMAGE:-ghcr.io/peervw/easy-runners-runner-rust:latest}
     build:
       context: .
       dockerfile: runner/Dockerfile
@@ -29,7 +29,7 @@ services:
     restart: "no"
 
   manager:
-    image: ${MANAGER_IMAGE:-easy-runners-manager:latest}
+    image: ${MANAGER_IMAGE:-ghcr.io/peervw/easy-runners-manager:latest}
     build:
       context: .
       dockerfile: Dockerfile
@@ -43,21 +43,20 @@ services:
       - path: .env
         required: false
     environment:
+      PUBLIC_URL: ${PUBLIC_URL:?Set PUBLIC_URL to the canonical HTTPS dashboard URL}
       MANAGER_PORT: "8080"
       CONFIG_PATH: /app/config.yaml
       DATA_DIR: /data
       DOCKER_HOST: unix:///var/run/docker.sock
       DOCKER_SOCKET_PATH: /var/run/docker.sock
       RUNNER_NETWORK: easy-runners
-      RUNNER_IMAGE: ${RUNNER_IMAGE:-easy-runners-runner:latest}
-      RUST_RUNNER_IMAGE: ${RUST_RUNNER_IMAGE:-easy-runners-runner-rust:latest}
+      RUNNER_IMAGE: ${RUNNER_IMAGE:-ghcr.io/peervw/easy-runners-runner:latest}
+      RUST_RUNNER_IMAGE: ${RUST_RUNNER_IMAGE:-ghcr.io/peervw/easy-runners-runner-rust:latest}
     ports:
       - "${MANAGER_BIND_ADDRESS:-127.0.0.1}:${MANAGER_PORT:-8080}:8080"
     volumes:
       - /var/run/docker.sock:/var/run/docker.sock
       - easy-runners-data:/data
-      - ./config.yaml:/app/config.yaml:ro
-      - ./secrets:/run/secrets:ro
     networks:
       - easy-runners
     read_only: true

@@ -15,6 +15,7 @@ COPY --from=uv /uv /uvx /bin/
 COPY pyproject.toml uv.lock README.md ./
 RUN --mount=type=cache,target=/root/.cache/uv uv sync --frozen --no-dev --no-install-project
 COPY src ./src
+COPY config.yaml ./config.yaml
 RUN --mount=type=cache,target=/root/.cache/uv uv sync --frozen --no-dev
 RUN mkdir -p /data && chmod 700 /data
 EXPOSE 8080

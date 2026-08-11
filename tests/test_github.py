@@ -159,6 +159,39 @@ async def test_installation_account_is_validated(tmp_path, monkeypatch) -> None:
 
 
 @pytest.mark.asyncio
+async def test_installation_repository_selection_is_saved(tmp_path, monkeypatch) -> None:
+    def handler(request: httpx.Request) -> httpx.Response:
+        if request.url.path == "/app/installations/99":
+            return httpx.Response(
+                200,
+                json={
+                    "id": 99,
+                    "account": {"login": "peer"},
+                    "repository_selection": "all",
+                },
+            )
+        if request.url.path == "/app/installations/99/access_tokens":
+            return httpx.Response(
+                201,
+                json={"token": "ghs", "expires_at": "2099-01-01T00:00:00Z"},
+            )
+        if request.url.path == "/repos/peer/repo":
+            return httpx.Response(200, json={"full_name": "peer/repo"})
+        raise AssertionError(request.url)
+
+    client, store, database = make_stack(tmp_path, handler)
+    store.save_manifest_result(
+        GitHubSetupRequest(scope="repo", owner="peer", repository="repo"),
+        {"id": 12, "slug": "easy", "pem": "PRIVATE", "webhook_secret": "hook"},
+    )
+    monkeypatch.setattr(client.auth, "app_jwt", lambda *args: "jwt")
+    await client.validate_installation(99)
+    assert store.credentials().connection.repository_selection == "all"
+    await client.close()
+    database.close()
+
+
+@pytest.mark.asyncio
 async def test_installation_must_include_target_repository(tmp_path, monkeypatch) -> None:
     def handler(request: httpx.Request) -> httpx.Response:
         if request.url.path == "/app/installations/99":
@@ -191,6 +224,11 @@ async def test_repository_poll_reconstructs_queued_job(tmp_path, monkeypatch) ->
         path = request.url.path
         if path == "/app/installations/99/access_tokens":
             return httpx.Response(201, json={"token": "ghs", "expires_at": "2099-01-01T00:00:00Z"})
+        if path == "/installation/repositories":
+            return httpx.Response(
+                200,
+                json={"repositories": [{"full_name": "peer/repo"}]},
+            )
         if path == "/repos/peer/repo/actions/runs":
             status = request.url.params["status"]
             return httpx.Response(
@@ -224,5 +262,70 @@ async def test_repository_poll_reconstructs_queued_job(tmp_path, monkeypatch) ->
     assert [(job.id, job.repository, job.labels) for job in jobs] == [
         (7, "peer/repo", ["docker", "self-hosted"])
     ]
+    await client.close()
+    database.close()
+
+
+@pytest.mark.asyncio
+async def test_app_installation_discovers_multiple_repositories_and_targets_registration(
+    tmp_path, monkeypatch
+) -> None:
+    calls: list[str] = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        calls.append(request.url.path)
+        if request.url.path == "/app/installations/99/access_tokens":
+            return httpx.Response(
+                201,
+                json={"token": "ghs", "expires_at": "2099-01-01T00:00:00Z"},
+            )
+        if request.url.path == "/installation/repositories":
+            return httpx.Response(
+                200,
+                json={
+                    "repositories": [
+                        {"full_name": "peer/one"},
+                        {"full_name": "peer/two"},
+                        {"full_name": "someone/ignored"},
+                    ]
+                },
+            )
+        if request.url.path == "/repos/peer/two/actions/runners/registration-token":
+            return httpx.Response(201, json={"token": "registration"})
+        if request.url.path == "/repos/peer/one/actions/runners":
+            return httpx.Response(
+                200,
+                json={"runners": [{"id": 11, "name": "one", "status": "online"}]},
+            )
+        if request.url.path == "/repos/peer/two/actions/runners":
+            return httpx.Response(
+                200,
+                json={"runners": [{"id": 22, "name": "two", "status": "online"}]},
+            )
+        if (
+            request.method == "DELETE"
+            and request.url.path == "/repos/peer/two/actions/runners/22"
+        ):
+            return httpx.Response(204)
+        raise AssertionError(request.url)
+
+    client, store, database = make_stack(tmp_path, handler)
+    store.save_manifest_result(
+        GitHubSetupRequest(scope="repo", owner="peer", repository="one"),
+        {"id": 12, "slug": "easy", "pem": "PRIVATE", "webhook_secret": "hook"},
+    )
+    store.save_installation(99, repository_selection="selected")
+    monkeypatch.setattr(client.auth, "app_jwt", lambda *args: "jwt")
+    assert await client.list_repositories() == ["peer/one", "peer/two"]
+    assert await client.registration_token("peer/two") == "registration"
+    assert await client.list_runners() == [
+        {"id": 11, "name": "one", "status": "online", "repository": "peer/one"},
+        {"id": 22, "name": "two", "status": "online", "repository": "peer/two"},
+    ]
+    await client.delete_runner(22, "peer/two")
+    with pytest.raises(ValueError, match="does not belong"):
+        await client.registration_token("peer/../attacker")
+    assert calls.count("/installation/repositories") == 1
+    assert store.credentials().connection.repositories_count == 2
     await client.close()
     database.close()

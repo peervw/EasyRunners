@@ -39,6 +39,7 @@
       <section id="connection" class="panel">
         <div class="section-heading"><h2>GitHub connection</h2><span id="github-badge" class="badge">Loading</span></div>
         <div id="connection-details"></div>
+        <div id="repository-access"></div>
         {% if connection and not connection.installation_id and connection.app_slug %}
         <div class="actions">
           <a class="button-link" href="/setup/github/resume">Continue GitHub installation</a>
@@ -52,10 +53,10 @@
         {% endif %}
         {% if not connection and not must_change %}
         <form id="github-setup" class="setup-grid">
-          <label class="wide">GitHub repository or organization URL<input name="target_url" placeholder="https://github.com/owner/repository" required></label>
-          <label class="check-label"><input name="organization_wide" type="checkbox"> Use all selected repositories in this organization</label>
+          <label class="wide">Start with a GitHub repository URL<input name="target_url" placeholder="https://github.com/owner/repository" required></label>
+          <label class="check-label"><input name="organization_wide" type="checkbox"> Use shared organization runners instead</label>
           <label class="check-label"><input name="webhook_enabled" type="checkbox" {% if webhook_enabled %}checked{% endif %}> Instant scaling with a public HTTPS webhook</label>
-          <p class="muted wide">Turn off instant scaling for a private/LAN install. EasyRunners will poll GitHub instead.</p>
+          <p class="muted wide">On GitHub, select every repository that should use EasyRunners. Personal-account runners stay isolated to the repository that requested them.</p>
           <button type="submit">Connect GitHub</button><span id="setup-progress" class="muted"></span>
         </form>
         {% endif %}
@@ -65,6 +66,27 @@
         <div class="section-heading"><h2>Ready to run?</h2><span id="readiness-badge" class="badge">Checking</span></div>
         <div id="readiness" class="check-list"></div>
         <p class="muted">The webhook check is informational: polling-only installations can be fully ready without it.</p>
+      </section>
+
+      <section class="panel">
+        <div class="section-heading"><h2>Use an existing workflow</h2><span class="badge">One line</span></div>
+        <p>In any selected repository, replace the job's current <code>runs-on</code> line:</p>
+        <div class="quickstart-line">
+          <select id="quickstart-pool" aria-label="Runner pool"></select>
+          <code id="runs-on-line">runs-on: [self-hosted, linux, x64, docker]</code>
+          <button id="copy-runs-on" class="secondary">Copy line</button>
+        </div>
+        <p class="muted">Push the workflow and watch the job move through queued → starting → busy → complete below.</p>
+        <details>
+          <summary>Generate a complete starter workflow</summary>
+          <form id="workflow-form" class="inline-form workflow-form">
+            <select name="pool" id="workflow-pool"></select>
+            <select name="template"><option value="python">Python CI</option><option value="node">Node CI</option><option value="rust">Rust CI</option><option value="docker">Docker build</option><option value="deploy">Deploy</option></select>
+            <button>Generate</button>
+          </form>
+          <textarea id="workflow-yaml" class="code-editor" readonly spellcheck="false" placeholder="Choose a pool and generate a workflow."></textarea>
+          <div class="actions"><button id="copy-workflow" class="secondary">Copy YAML</button><a id="create-workflow-link" class="button-link hidden" target="_blank" rel="noopener">Open GitHub Actions</a></div>
+        </details>
       </section>
 
       <section><div class="section-heading"><h2>Runner pools</h2><span id="updated" class="muted"></span></div><div id="pools" class="card-grid"></div></section>
@@ -87,17 +109,7 @@
           <div class="actions"><button id="export-pools" class="secondary">Export current</button><button id="import-pools">Import and replace</button></div>
         </details>
       </section>
-      <section class="panel">
-        <div class="section-heading"><h2>Create a workflow</h2><span class="muted">Copy-paste ready</span></div>
-        <form id="workflow-form" class="inline-form">
-          <select name="pool" id="workflow-pool"></select>
-          <select name="template"><option value="python">Python CI</option><option value="node">Node CI</option><option value="rust">Rust CI</option><option value="docker">Docker build</option><option value="deploy">Deploy</option></select>
-          <button>Generate</button>
-        </form>
-        <textarea id="workflow-yaml" class="code-editor" readonly spellcheck="false" placeholder="Choose a pool and generate a workflow."></textarea>
-        <div class="actions"><button id="copy-workflow" class="secondary">Copy YAML</button><a id="create-workflow-link" class="button-link hidden" target="_blank" rel="noopener">Open GitHub Actions</a></div>
-      </section>
-      <section class="panel"><div class="section-heading"><h2>Active runners</h2><span id="runner-count" class="badge">0</span></div><div class="table-wrap"><table><thead><tr><th>Runner</th><th>Pool</th><th>State</th><th>Uptime</th><th>Container</th><th>Labels</th></tr></thead><tbody id="runners"></tbody></table></div></section>
+      <section class="panel"><div class="section-heading"><h2>Active runners</h2><span id="runner-count" class="badge">0</span></div><div class="table-wrap"><table><thead><tr><th>Runner</th><th>Repository</th><th>Pool</th><th>State</th><th>Uptime</th><th>Container</th><th>Labels</th></tr></thead><tbody id="runners"></tbody></table></div></section>
       <section class="panel"><div class="section-heading"><h2>Queued and active jobs</h2><span id="job-count" class="badge">0</span></div><div class="table-wrap"><table><thead><tr><th>Job</th><th>Repository</th><th>Pool</th><th>Status</th><th>Runner</th><th>Queued</th></tr></thead><tbody id="jobs"></tbody></table></div></section>
       <section class="panel"><div class="section-heading"><h2>Recent jobs</h2></div><div class="table-wrap"><table><thead><tr><th>Job</th><th>Repository</th><th>Pool</th><th>Conclusion</th><th>Completed</th></tr></thead><tbody id="history"></tbody></table></div></section>
       <section class="panel"><div class="section-heading"><h2>API tokens</h2></div><form id="token-form" class="inline-form"><input name="name" placeholder="Token name" required><button>Create token</button></form><div id="new-token"></div><ul id="tokens" class="token-list"></ul></section>

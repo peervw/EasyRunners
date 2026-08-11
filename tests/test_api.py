@@ -181,6 +181,30 @@ def test_pool_crud_yaml_workflow_and_readiness(client) -> None:
     assert app.state.database.get_setting("runner_pools_override")
 
 
+def test_github_status_lists_selected_repositories(client, monkeypatch) -> None:
+    test_client, app = client
+    _, _ = login(test_client, app)
+    app.state.github_store.save_manifest_result(
+        GitHubSetupRequest(scope="repo", owner="peer", repository="one"),
+        {"id": 1, "slug": "easy", "pem": "PRIVATE", "webhook_secret": "secret"},
+    )
+    app.state.github_store.save_installation(2, repository_selection="selected")
+
+    async def metadata(*, refresh=False):
+        return app.state.github_store.credentials().connection
+
+    async def repositories(*, refresh=False):
+        return ["peer/one", "peer/two"]
+
+    monkeypatch.setattr(app.state.github, "refresh_installation_metadata", metadata)
+    monkeypatch.setattr(app.state.github, "list_repositories", repositories)
+    response = test_client.get("/api/github")
+    assert response.status_code == 200
+    assert response.json()["repositories"] == ["peer/one", "peer/two"]
+    assert response.json()["repository_bound"] is True
+    assert response.json()["configure_url"].endswith("/settings/installations/2")
+
+
 def test_webhook_signature_replay_and_demand(client) -> None:
     test_client, app = client
     app.state.github_store.save_manifest_result(
@@ -214,3 +238,48 @@ def test_webhook_signature_replay_and_demand(client) -> None:
     assert test_client.post("/webhooks/github", content=raw, headers=headers).json()["duplicate"]
     bad = {**headers, "X-GitHub-Delivery": "delivery-2", "X-Hub-Signature-256": "sha256=bad"}
     assert test_client.post("/webhooks/github", content=raw, headers=bad).status_code == 401
+
+
+def test_repo_app_accepts_another_selected_repository_webhook(client) -> None:
+    test_client, app = client
+    app.state.github_store.save_manifest_result(
+        GitHubSetupRequest(scope="repo", owner="peer", repository="first"),
+        {"id": 1, "slug": "easy", "pem": "PRIVATE", "webhook_secret": "secret"},
+    )
+    app.state.github_store.save_installation(2, repository_selection="selected")
+    payload = {
+        "action": "queued",
+        "installation": {"id": 2},
+        "repository": {"full_name": "peer/second"},
+        "workflow_job": {
+            "id": 8,
+            "run_id": 10,
+            "name": "build",
+            "labels": ["self-hosted", "linux", "x64", "docker"],
+        },
+    }
+    raw = json.dumps(payload).encode()
+    headers = {
+        "Content-Type": "application/json",
+        "X-Hub-Signature-256": "sha256="
+        + hmac.new(b"secret", raw, hashlib.sha256).hexdigest(),
+        "X-GitHub-Delivery": "delivery-multi-repo",
+        "X-GitHub-Event": "workflow_job",
+    }
+    response = test_client.post("/webhooks/github", content=raw, headers=headers)
+    assert response.status_code == 200
+    assert response.json() == {"accepted": True, "matched_pool": "default"}
+    payload["repository"]["full_name"] = "attacker/second"
+    rejected_raw = json.dumps(payload).encode()
+    rejected_headers = {
+        **headers,
+        "X-GitHub-Delivery": "delivery-wrong-owner",
+        "X-Hub-Signature-256": "sha256="
+        + hmac.new(b"secret", rejected_raw, hashlib.sha256).hexdigest(),
+    }
+    assert (
+        test_client.post(
+            "/webhooks/github", content=rejected_raw, headers=rejected_headers
+        ).status_code
+        == 403
+    )

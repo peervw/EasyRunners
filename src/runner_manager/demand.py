@@ -126,6 +126,18 @@ class DemandTracker:
                     result[job.pool] += 1
         return result
 
+    async def queued_repositories(self, pool: str) -> list[str]:
+        async with self._lock:
+            jobs = sorted(
+                (
+                    job
+                    for job in self._jobs.values()
+                    if job.status == "queued" and job.pool == pool
+                ),
+                key=lambda job: (job.queued_at, job.id),
+            )
+            return [job.repository for job in jobs]
+
     def _update_metrics(self) -> None:
         counts = dict.fromkeys(self.pools, 0)
         for job in self._jobs.values():

@@ -3,6 +3,7 @@ from __future__ import annotations
 import asyncio
 import contextlib
 import re
+from collections import Counter
 from dataclasses import dataclass
 from datetime import UTC, datetime, timedelta
 from time import monotonic
@@ -15,7 +16,7 @@ from runner_manager.demand import DemandTracker
 from runner_manager.docker import DockerRunnerManager
 from runner_manager.github import GitHubClient
 from runner_manager.metrics import RECONCILE_DURATION, RUNNER_CREATION_FAILURES, RUNNERS
-from runner_manager.models import ManagedRunner, RunnerPoolConfig
+from runner_manager.models import GitHubScope, ManagedRunner, RunnerPoolConfig
 
 log = structlog.get_logger()
 
@@ -74,6 +75,7 @@ class Scheduler:
         self._task: asyncio.Task[None] | None = None
         self._last_queue_poll = 0.0
         self._last_full_poll = 0.0
+        self._last_runner_sweep = 0.0
 
     def start(self) -> None:
         if not self._task:
@@ -113,7 +115,7 @@ class Scheduler:
             jobs = await self.demand.snapshot()
             repositories = sorted({job.repository for job in jobs})
             connection = self.github.store.credentials()
-            if connection and connection.connection.scope.value == "repo":
+            if connection and connection.connection.scope == GitHubScope.REPO:
                 repositories = None
             elif not repositories:
                 self._last_queue_poll = now
@@ -209,10 +211,39 @@ class Scheduler:
             raise RuntimeError("Docker Engine is unavailable")
         containers = await self.docker.list_managed()
 
+        credentials = self.github.store.credentials()
+        repository_bound = bool(
+            credentials and credentials.connection.scope == GitHubScope.REPO
+        )
+        anchor_repository = (
+            credentials.connection.target_name if repository_bound and credentials else None
+        )
+        if anchor_repository:
+            for runner in containers:
+                # Containers created before multi-repository support belong to the original target.
+                runner.repository = runner.repository or anchor_repository
+
         github_runners: list[dict[str, Any]] = []
-        if self.github.store.credentials():
+        if credentials:
             try:
-                github_runners = await self.github.list_runners()
+                repositories: list[str] | None = None
+                if repository_bound:
+                    full_sweep = (
+                        not self._last_runner_sweep
+                        or monotonic() - self._last_runner_sweep
+                        >= self.settings.full_poll_interval
+                    )
+                    if full_sweep:
+                        self._last_runner_sweep = monotonic()
+                    else:
+                        jobs = await self.demand.snapshot()
+                        repositories = sorted(
+                            {
+                                *(runner.repository for runner in containers if runner.repository),
+                                *(job.repository for job in jobs),
+                            }
+                        )
+                github_runners = await self.github.list_runners(repositories)
                 self._github_connected = True
             except Exception as exc:
                 self._github_connected = False
@@ -271,7 +302,10 @@ class Scheduler:
                 and remote.get("status") == "offline"
                 and remote.get("name") not in live_names
             ):
-                await self.github.delete_runner(int(remote["id"]))
+                await self.github.delete_runner(
+                    int(remote["id"]),
+                    str(remote.get("repository")) if remote.get("repository") else None,
+                )
                 log.info("runner.stale_registration_removed", runner=remote.get("name"))
 
         queued = await self.demand.queued_counts()
@@ -289,30 +323,134 @@ class Scheduler:
                 busy=busy,
                 manual_floor=manual.desired if manual else 0,
             )
-            for _ in range(decision.create):
+            create_targets: list[str | None]
+            if repository_bound and anchor_repository:
+                queued_repositories = await self.demand.queued_repositories(pool_name)
+                queued_by_repository = Counter(queued_repositories)
+                starting_by_repository = Counter(
+                    runner.repository
+                    for runner in pool_runners
+                    if runner.state == "starting" and runner.repository
+                )
+                idle_by_repository = Counter(
+                    runner.repository
+                    for runner in pool_runners
+                    if runner.state == "idle" and runner.repository
+                )
+                deficits = {
+                    repository: max(
+                        0,
+                        count
+                        - starting_by_repository[repository]
+                        - idle_by_repository[repository],
+                    )
+                    for repository, count in queued_by_repository.items()
+                }
+                create_targets = []
+                for repository in queued_repositories:
+                    if deficits[repository] > 0:
+                        create_targets.append(repository)
+                        deficits[repository] -= 1
+                available_slots = max(0, pool.max - len(pool_runners))
+                create_targets = create_targets[:available_slots]
+                floor_shortage = max(
+                    0,
+                    decision.target - len(pool_runners) - len(create_targets),
+                )
+                create_targets.extend(
+                    [anchor_repository]
+                    * min(floor_shortage, available_slots - len(create_targets))
+                )
+            else:
+                create_targets = [None] * decision.create
+
+            for target_repository in create_targets:
                 try:
-                    token = await self.github.registration_token()
+                    token = await self.github.registration_token(target_repository)
                     created = await self.docker.create_runner(
-                        pool_name, pool, token, self.github.target_url()
+                        pool_name,
+                        pool,
+                        token,
+                        self.github.target_url(target_repository),
+                        target_repository,
                     )
                     live.append(created)
+                    pool_runners.append(created)
                 except Exception as exc:
                     RUNNER_CREATION_FAILURES.labels(pool=pool_name).inc()
                     log.exception("runner.create_failed", pool=pool_name, error=str(exc))
                     break
 
-            removable = sorted(
-                (
-                    runner
+            removal_count = max(0, len(pool_runners) - decision.target)
+            removable: list[ManagedRunner] = []
+            if repository_bound and anchor_repository:
+                queued_by_repository = Counter(
+                    await self.demand.queued_repositories(pool_name)
+                )
+                starting_by_repository = Counter(
+                    runner.repository
+                    for runner in pool_runners
+                    if runner.state == "starting" and runner.repository
+                )
+                busy_total = sum(runner.state == "busy" for runner in pool_runners)
+                floor = max(pool.min, manual.desired if manual else 0)
+                floor_extra = max(0, floor - busy_total - sum(queued_by_repository.values()))
+                spare_anchor_starting = max(
+                    0,
+                    starting_by_repository[anchor_repository]
+                    - queued_by_repository[anchor_repository],
+                )
+                floor_idle = max(0, floor_extra - spare_anchor_starting)
+                idle_allowance = {
+                    repository: max(
+                        0,
+                        queued - starting_by_repository[repository],
+                    )
+                    for repository, queued in queued_by_repository.items()
+                }
+                idle_allowance[anchor_repository] = (
+                    idle_allowance.get(anchor_repository, 0) + floor_idle
+                )
+                idle_repositories = {
+                    runner.repository or anchor_repository
                     for runner in pool_runners
                     if runner.state == "idle"
-                    and runner.idle_since
-                    and (now - runner.idle_since).total_seconds()
-                    >= max(pool.idle_timeout, self.settings.assignment_grace_seconds)
-                ),
-                key=lambda item: item.idle_since or now,
-            )
-            for runner in removable[: decision.excess_idle]:
+                }
+                for repository in idle_repositories:
+                    idle_runners = sorted(
+                        (
+                            runner
+                            for runner in pool_runners
+                            if runner.state == "idle"
+                            and (runner.repository or anchor_repository) == repository
+                            and runner.idle_since
+                            and (now - runner.idle_since).total_seconds()
+                            >= max(pool.idle_timeout, self.settings.assignment_grace_seconds)
+                        ),
+                        key=lambda item: item.idle_since or now,
+                    )
+                    removable.extend(
+                        idle_runners[
+                            : max(
+                                0,
+                                len(idle_runners) - idle_allowance.get(repository, 0),
+                            )
+                        ]
+                    )
+                removable.sort(key=lambda item: item.idle_since or now)
+            else:
+                removable = sorted(
+                    (
+                        runner
+                        for runner in pool_runners
+                        if runner.state == "idle"
+                        and runner.idle_since
+                        and (now - runner.idle_since).total_seconds()
+                        >= max(pool.idle_timeout, self.settings.assignment_grace_seconds)
+                    ),
+                    key=lambda item: item.idle_since or now,
+                )
+            for runner in removable[:removal_count]:
                 await self.docker.remove_runner(runner, "idle_scale_down")
                 live.remove(runner)
                 self._clear_timers(runner.name)

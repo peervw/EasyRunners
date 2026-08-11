@@ -90,6 +90,7 @@ class ManagedRunner(BaseModel):
     container_status: str
     created_at: datetime
     labels: list[str] = Field(default_factory=list)
+    repository: str | None = None
     state: Literal["starting", "idle", "busy", "exited", "unknown"] = "starting"
     github_runner_id: int | None = None
     github_status: str | None = None
