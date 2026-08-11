@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import asyncio
+import hashlib
 import json
 import logging
 from collections.abc import AsyncIterator
@@ -45,6 +46,12 @@ def create_app(settings: Settings | None = None, *, start_scheduler: bool = True
     configured.assert_production_safe()
     configure_logging(configured.log_level)
     package_dir = Path(__file__).parent
+    asset_version = hashlib.sha256(
+        b"".join(
+            (package_dir / "static" / name).read_bytes()
+            for name in ("app.css", "easy.css", "app.js")
+        )
+    ).hexdigest()[:12]
 
     @asynccontextmanager
     async def lifespan(app: FastAPI) -> AsyncIterator[None]:
@@ -97,6 +104,7 @@ def create_app(settings: Settings | None = None, *, start_scheduler: bool = True
     )
     app.state.background_tasks = set()
     app.state.templates = Jinja2Templates(directory=package_dir / "templates")
+    app.state.templates.env.globals["asset_version"] = asset_version
     app.mount("/static", StaticFiles(directory=package_dir / "static"), name="static")
 
     @app.middleware("http")
@@ -110,6 +118,13 @@ def create_app(settings: Settings | None = None, *, start_scheduler: bool = True
         response.headers["X-Frame-Options"] = "DENY"
         response.headers["Referrer-Policy"] = "no-referrer"
         response.headers["Permissions-Policy"] = "camera=(), microphone=(), geolocation=()"
+        if request.url.path.startswith("/static/"):
+            if request.query_params.get("v") == asset_version:
+                response.headers["Cache-Control"] = "public, max-age=31536000, immutable"
+            else:
+                response.headers["Cache-Control"] = "no-cache"
+        elif response.headers.get("Content-Type", "").startswith("text/html"):
+            response.headers["Cache-Control"] = "no-store"
         if configured.public_url.startswith("https://"):
             response.headers["Strict-Transport-Security"] = "max-age=31536000; includeSubDomains"
         return response

@@ -5,9 +5,9 @@
     <meta name="viewport" content="width=device-width,initial-scale=1">
     <meta name="csrf-token" content="{{ csrf }}">
     <title>EasyRunners</title>
-    <link rel="stylesheet" href="/static/app.css">
-    <link rel="stylesheet" href="/static/easy.css">
-    <script src="/static/app.js" defer></script>
+    <link rel="stylesheet" href="/static/app.css?v={{ asset_version }}">
+    <link rel="stylesheet" href="/static/easy.css?v={{ asset_version }}">
+    <script src="/static/app.js?v={{ asset_version }}" defer></script>
   </head>
   <body>
     <header>

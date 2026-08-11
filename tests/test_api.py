@@ -76,9 +76,16 @@ def test_health_is_public_but_api_is_protected(client) -> None:
 def test_login_dashboard_csrf_and_api_token(client) -> None:
     test_client, app = client
     _, csrf = login(test_client, app)
-    assert test_client.get("/").status_code == 200
-    assert "GitHub account or organization URL" in test_client.get("/").text
-    assert "Advanced settings" in test_client.get("/").text
+    dashboard = test_client.get("/")
+    assert dashboard.status_code == 200
+    assert dashboard.headers["Cache-Control"] == "no-store"
+    assert "GitHub account or organization URL" in dashboard.text
+    assert "Advanced settings" in dashboard.text
+    asset_version = app.state.templates.env.globals["asset_version"]
+    assert f'/static/app.js?v={asset_version}' in dashboard.text
+    versioned_asset = test_client.get(f"/static/app.js?v={asset_version}")
+    assert versioned_asset.headers["Cache-Control"] == "public, max-age=31536000, immutable"
+    assert test_client.get("/static/app.js").headers["Cache-Control"] == "no-cache"
     assert test_client.post("/api/reconcile").status_code == 403
     response = test_client.post(
         "/api/auth/tokens",
