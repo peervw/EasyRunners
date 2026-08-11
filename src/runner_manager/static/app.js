@@ -38,6 +38,7 @@ function updateRunsOn() {
 
 function repositoryOptions() {
   if (!repositoryBound) return '<option value="">Shared organization runner</option>';
+  if (!githubRepositories.length) return '<option value="" selected>No repositories available</option>';
   return githubRepositories.map(repository => `<option value="${esc(repository)}">${esc(repository)}</option>`).join('');
 }
 
@@ -107,9 +108,12 @@ async function refresh() {
     const accessWarning = selection === 'all'
       ? '<p class="access-warning">GitHub granted this App access to all repositories. EasyRunners can serve matching jobs from any of them. Select only the repositories you trust.</p>'
       : '';
+    const repositoryErrors = [github.metadata_error, github.repositories_error].filter(Boolean);
     const repositoryList = github.repositories?.length
       ? `<div class="repository-list">${github.repositories.map(repository => `<span class="label">${esc(repository)}</span>`).join('')}</div>`
-      : (github.repositories_error ? `<p class="muted">Repository discovery failed: ${esc(github.repositories_error)}</p>` : '');
+      : (github.repository_bound
+        ? `<p class="access-warning">No repositories could be loaded. ${repositoryErrors.length ? esc(repositoryErrors.join(' · ')) : 'Check the App repository access on GitHub.'}</p>`
+        : '');
     const configure = github.configure_url
       ? `<a href="${esc(github.configure_url)}" target="_blank" rel="noopener">Manage repository access on GitHub</a>`
       : '';
@@ -142,7 +146,7 @@ async function refresh() {
           ${repositoryBound ? `<select name="repository" aria-label="Pre-warm repository" required>${repositoryOptions()}</select>` : ''}
           <input name="desired" type="number" min="0" max="${pool.max}" value="0" aria-label="Desired pre-warm">
           <input name="ttl" type="number" min="30" value="600" aria-label="TTL seconds">
-          <button>Pre-warm</button>
+          <button ${repositoryBound && !githubRepositories.length ? 'disabled title="No GitHub repositories are available"' : ''}>Pre-warm</button>
         </form>
         <div class="actions"><button class="secondary compact edit-pool" data-pool="${esc(name)}">Edit</button><button class="secondary compact delete-pool" data-pool="${esc(name)}">Delete</button></div>
       </article>`).join('');
@@ -159,12 +163,14 @@ async function refresh() {
     const selectedQuickstartRepository = quickstartRepository.value;
     quickstartRepository.innerHTML = repositoryOptions();
     quickstartRepository.classList.toggle('hidden', !repositoryBound);
+    quickstartRepository.disabled = repositoryBound && !githubRepositories.length;
     if (githubRepositories.includes(selectedQuickstartRepository)) quickstartRepository.value = selectedQuickstartRepository;
     const testRepository = document.querySelector('#test-repository');
     if (testRepository) {
       const selectedTestRepository = testRepository.value;
       testRepository.innerHTML = repositoryOptions();
       testRepository.classList.toggle('hidden', !repositoryBound);
+      testRepository.disabled = repositoryBound && !githubRepositories.length;
       if (githubRepositories.includes(selectedTestRepository)) testRepository.value = selectedTestRepository;
     }
     const testPool = document.querySelector('#test-pool');
@@ -172,6 +178,11 @@ async function refresh() {
       const selectedTestPool = testPool.value;
       testPool.innerHTML = Object.keys(status.pools).map(name => `<option value="${esc(name)}">${esc(name)}</option>`).join('');
       if (status.pools[selectedTestPool]) testPool.value = selectedTestPool;
+    }
+    const testRunnerButton = document.querySelector('#test-runner-form button');
+    if (testRunnerButton) {
+      testRunnerButton.disabled = repositoryBound && !githubRepositories.length;
+      testRunnerButton.title = testRunnerButton.disabled ? 'No GitHub repositories are available' : '';
     }
     updateRunsOn();
 

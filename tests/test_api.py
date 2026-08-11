@@ -3,6 +3,7 @@ import hmac
 import json
 from typing import Any
 
+import httpx
 import pytest
 from fastapi.testclient import TestClient
 
@@ -216,6 +217,34 @@ def test_github_status_lists_selected_repositories(client, monkeypatch) -> None:
         ).status_code
         == 422
     )
+
+
+def test_github_status_lists_repositories_when_metadata_refresh_fails(
+    client, monkeypatch
+) -> None:
+    test_client, app = client
+    _, _ = login(test_client, app)
+    app.state.github_store.save_manifest_result(
+        GitHubSetupRequest(scope="repo", owner="peer"),
+        {"id": 1, "slug": "easy", "pem": "PRIVATE", "webhook_secret": "secret"},
+    )
+    app.state.github_store.save_installation(2, repository_selection="selected")
+
+    async def metadata(*, refresh=False):
+        raise httpx.HTTPError("installation metadata unavailable")
+
+    async def repositories(*, refresh=False):
+        return ["peer/one", "peer/two"]
+
+    monkeypatch.setattr(app.state.github, "refresh_installation_metadata", metadata)
+    monkeypatch.setattr(app.state.github, "list_repositories", repositories)
+
+    response = test_client.get("/api/github")
+
+    assert response.status_code == 200
+    assert response.json()["repositories"] == ["peer/one", "peer/two"]
+    assert response.json()["metadata_error"] == "installation metadata unavailable"
+    assert response.json()["repositories_error"] is None
 
 
 def test_runner_request_carries_repository_and_pool(client, monkeypatch) -> None:

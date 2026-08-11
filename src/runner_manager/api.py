@@ -521,10 +521,14 @@ async def api_github(
 ) -> dict[str, Any]:
     credentials = _store(request).credentials(require_installation=False)
     repositories: list[str] = []
+    metadata_error: str | None = None
     repositories_error: str | None = None
     if credentials and credentials.connection.installation_id:
         try:
             await _github(request).refresh_installation_metadata()
+        except (httpx.HTTPError, RuntimeError, ValueError) as exc:
+            metadata_error = str(exc)
+        try:
             repositories = await _github(request).list_repositories()
         except (httpx.HTTPError, RuntimeError, ValueError) as exc:
             repositories_error = str(exc)
@@ -541,6 +545,7 @@ async def api_github(
         "installed": bool(connection and connection.installation_id),
         "connection": connection.model_dump(mode="json") if connection else None,
         "repositories": repositories,
+        "metadata_error": metadata_error,
         "repositories_error": repositories_error,
         "configure_url": configure_url,
         "repository_bound": bool(connection and connection.scope == GitHubScope.REPO),
