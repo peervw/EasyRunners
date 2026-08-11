@@ -9,13 +9,14 @@ from collections.abc import Coroutine
 from dataclasses import dataclass
 from datetime import UTC, datetime
 from importlib.metadata import PackageNotFoundError, version
+from pathlib import Path
 from typing import Annotated, Any, cast
 from urllib.parse import quote
 
 import httpx
 import yaml
 from fastapi import APIRouter, Depends, Form, HTTPException, Query, Request, Response, status
-from fastapi.responses import HTMLResponse, JSONResponse, RedirectResponse
+from fastapi.responses import FileResponse, HTMLResponse, JSONResponse, RedirectResponse
 from prometheus_client import CONTENT_TYPE_LATEST, generate_latest
 
 from runner_manager.auth import AuthManager
@@ -31,9 +32,9 @@ from runner_manager.models import (
     RunnerPoolConfig,
     ScaleRequest,
     TokenCreateRequest,
+    TokenScope,
 )
 from runner_manager.scheduler import Scheduler
-from runner_manager.workflows import workflow_for
 
 router = APIRouter()
 
@@ -42,6 +43,7 @@ router = APIRouter()
 class AuthContext:
     kind: str
     session: dict[str, Any] | None = None
+    token_scope: str | None = None
 
 
 def _auth(request: Request) -> AuthManager:
@@ -67,8 +69,13 @@ def _store(request: Request) -> GitHubConnectionStore:
 def require_auth(request: Request) -> AuthContext:
     auth = _auth(request)
     authorization = request.headers.get("Authorization", "")
-    if authorization.startswith("Bearer ") and auth.verify_api_token(authorization[7:]):
-        return AuthContext("token")
+    if authorization.startswith("Bearer "):
+        record = auth.authenticate_api_token(authorization[7:])
+        if record:
+            scope = str(record.get("scope") or "manage")
+            if scope == "metrics":
+                raise HTTPException(status_code=403, detail="token is restricted to metrics")
+            return AuthContext("token", token_scope=scope)
     session = auth.verify_session(request.cookies.get(auth.cookie_name))
     if session:
         if auth.must_change_password:
@@ -80,11 +87,26 @@ def require_auth(request: Request) -> AuthContext:
 def require_mutation(
     request: Request, context: Annotated[AuthContext, Depends(require_auth)]
 ) -> AuthContext:
+    if context.kind == "token" and context.token_scope != TokenScope.MANAGE.value:
+        raise HTTPException(status_code=403, detail="token does not have manage scope")
     if context.kind == "session":
         csrf = request.headers.get("X-CSRF-Token")
         if not context.session or not _auth(request).verify_csrf(context.session, csrf):
             raise HTTPException(status_code=403, detail="invalid CSRF token")
     return context
+
+
+def require_metrics(request: Request) -> AuthContext:
+    auth = _auth(request)
+    authorization = request.headers.get("Authorization", "")
+    if authorization.startswith("Bearer "):
+        record = auth.authenticate_api_token(authorization[7:])
+        if record:
+            return AuthContext("token", token_scope=str(record.get("scope") or "manage"))
+    session = auth.verify_session(request.cookies.get(auth.cookie_name))
+    if session and not auth.must_change_password:
+        return AuthContext("session", session)
+    raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="authentication required")
 
 
 def _spawn(request: Request, coroutine: Coroutine[Any, Any, Any]) -> None:
@@ -248,8 +270,7 @@ async def api_runners(
 async def api_jobs(
     request: Request, _: Annotated[AuthContext, Depends(require_auth)]
 ) -> list[dict[str, Any]]:
-    jobs = await request.app.state.demand.snapshot()
-    return [job.model_dump(mode="json") for job in jobs]
+    return await _scheduler(request).job_views()
 
 
 @router.get("/api/pools")
@@ -336,6 +357,45 @@ async def api_history(
     limit: int = 100,
 ) -> list[dict[str, Any]]:
     return _database(request).list_history(max(1, min(limit, 500)))
+
+
+@router.get("/api/diagnostics")
+async def api_diagnostics(
+    request: Request, _: Annotated[AuthContext, Depends(require_auth)]
+) -> list[dict[str, Any]]:
+    directory = request.app.state.settings.data_dir / "runner-logs"
+    if not directory.exists():
+        return []
+    files = [
+        path
+        for path in directory.iterdir()
+        if path.is_file()
+        and not path.is_symlink()
+        and path.name.endswith((".tar", ".log"))
+    ]
+    files.sort(key=lambda path: path.stat().st_mtime, reverse=True)
+    return [
+        {
+            "name": path.name,
+            "size": path.stat().st_size,
+            "modified_at": datetime.fromtimestamp(path.stat().st_mtime, UTC).isoformat(),
+        }
+        for path in files[:100]
+    ]
+
+
+@router.get("/api/diagnostics/{name}")
+async def api_diagnostic_download(
+    request: Request,
+    name: str,
+    _: Annotated[AuthContext, Depends(require_auth)],
+) -> FileResponse:
+    if name != Path(name).name or not name.endswith((".tar", ".log")):
+        raise HTTPException(status_code=404, detail="diagnostic archive not found")
+    path = request.app.state.settings.data_dir / "runner-logs" / name
+    if not path.is_file() or path.is_symlink():
+        raise HTTPException(status_code=404, detail="diagnostic archive not found")
+    return FileResponse(path, filename=name, media_type="application/octet-stream")
 
 
 @router.post("/api/pools/{pool}/scale")
@@ -451,42 +511,6 @@ async def api_version(
     }
 
 
-@router.get("/api/pools/{pool}/workflow")
-async def api_workflow(
-    request: Request,
-    pool: str,
-    _: Annotated[AuthContext, Depends(require_auth)],
-    template: str = "python",
-    repository: str | None = None,
-) -> dict[str, Any]:
-    config = _scheduler(request).settings.runner_pools.get(pool)
-    if not config:
-        raise HTTPException(status_code=404, detail="unknown pool")
-    try:
-        content = workflow_for(pool, config, template)
-    except KeyError as exc:
-        raise HTTPException(status_code=422, detail="unknown workflow template") from exc
-    credentials = _store(request).credentials(require_installation=False)
-    create_url = None
-    if credentials and credentials.connection.scope == GitHubScope.REPO:
-        selected = await _github(request).list_repositories()
-        requested = repository
-        if not requested and credentials.connection.repository:
-            requested = credentials.connection.target_name
-        match = next(
-            (item for item in selected if requested and item.lower() == requested.lower()),
-            None,
-        )
-        if repository and not match:
-            raise HTTPException(
-                status_code=422,
-                detail="repository is not selected in the GitHub App installation",
-            )
-        if match:
-            create_url = f"{_github(request).settings.github_web_url}/{match}/actions/new"
-    return {"filename": f"{template}.yml", "yaml": content, "create_url": create_url}
-
-
 @router.get("/api/auth/tokens")
 async def api_tokens(
     request: Request, _: Annotated[AuthContext, Depends(require_auth)]
@@ -500,7 +524,11 @@ async def api_create_token(
     body: TokenCreateRequest,
     _: Annotated[AuthContext, Depends(require_mutation)],
 ) -> dict[str, Any]:
-    token, record = _auth(request).create_api_token(body.name)
+    token, record = _auth(request).create_api_token(
+        body.name,
+        body.scope,
+        body.expires_in_days,
+    )
     return {**record, "token": token}
 
 
@@ -521,10 +549,14 @@ async def api_github(
 ) -> dict[str, Any]:
     credentials = _store(request).credentials(require_installation=False)
     repositories: list[str] = []
+    metadata_error: str | None = None
     repositories_error: str | None = None
     if credentials and credentials.connection.installation_id:
         try:
             await _github(request).refresh_installation_metadata()
+        except (httpx.HTTPError, RuntimeError, ValueError) as exc:
+            metadata_error = str(exc)
+        try:
             repositories = await _github(request).list_repositories()
         except (httpx.HTTPError, RuntimeError, ValueError) as exc:
             repositories_error = str(exc)
@@ -541,7 +573,9 @@ async def api_github(
         "installed": bool(connection and connection.installation_id),
         "connection": connection.model_dump(mode="json") if connection else None,
         "repositories": repositories,
+        "metadata_error": metadata_error,
         "repositories_error": repositories_error,
+        "rate_limit": _github(request).rate_limit_status(),
         "configure_url": configure_url,
         "repository_bound": bool(connection and connection.scope == GitHubScope.REPO),
     }
@@ -710,5 +744,5 @@ async def github_webhook(request: Request) -> JSONResponse:
 
 
 @router.get("/metrics")
-async def metrics(_: Annotated[AuthContext, Depends(require_auth)]) -> Response:
+async def metrics(_: Annotated[AuthContext, Depends(require_metrics)]) -> Response:
     return Response(generate_latest(), media_type=CONTENT_TYPE_LATEST)

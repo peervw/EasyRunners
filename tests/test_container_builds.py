@@ -58,3 +58,19 @@ def test_one_compose_builds_every_image_from_source() -> None:
     assert all(not volume.startswith("./") for volume in manager_volumes)
     assert "COPY config.yaml ./config.yaml" in (REPOSITORY_ROOT / "Dockerfile").read_text()
     assert not (REPOSITORY_ROOT / ".github/workflows/release-images.yml").exists()
+
+
+def test_ci_and_examples_pin_actions_to_immutable_commits() -> None:
+    workflow_files = [
+        REPOSITORY_ROOT / ".github/workflows/ci.yml",
+        *sorted((REPOSITORY_ROOT / "examples").glob("*.yaml")),
+    ]
+    for path in workflow_files:
+        references = re.findall(r"uses:\s+[^\s@]+@([^\s#]+)", path.read_text())
+        assert references, f"{path} has no action references"
+        assert all(re.fullmatch(r"[0-9a-f]{40}", reference) for reference in references)
+
+    ci = (REPOSITORY_ROOT / ".github/workflows/ci.yml").read_text()
+    assert "uv run ruff check ." in ci
+    assert "uv run mypy src" in ci
+    assert "linux/amd64,linux/arm64" in ci

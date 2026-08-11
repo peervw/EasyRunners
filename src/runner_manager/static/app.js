@@ -8,6 +8,8 @@ let poolConfigs = {};
 let githubRepositories = [];
 let repositoryBound = false;
 let refreshing = false;
+let dashboardCache = {};
+let lastRefreshFailure = '';
 
 function toast(message, kind = 'error') {
   const item = document.createElement('div');
@@ -26,7 +28,7 @@ function duration(seconds) {
 
 function orderedLabels(labels) {
   const values = [...new Set((labels || []).map(label => String(label).toLowerCase()))];
-  const builtins = ['self-hosted', 'linux', 'x64'];
+  const builtins = ['self-hosted', 'linux', 'x64', 'arm64', 'arm'];
   return [...builtins.filter(label => values.includes(label)), ...values.filter(label => !builtins.includes(label)).sort()];
 }
 
@@ -38,6 +40,7 @@ function updateRunsOn() {
 
 function repositoryOptions() {
   if (!repositoryBound) return '<option value="">Shared organization runner</option>';
+  if (!githubRepositories.length) return '<option value="" selected>No repositories available</option>';
   return githubRepositories.map(repository => `<option value="${esc(repository)}">${esc(repository)}</option>`).join('');
 }
 
@@ -83,16 +86,33 @@ async function refresh() {
   if (refreshing) return;
   refreshing = true;
   try {
-    const [status, runners, jobs, history, tokens, github, readiness, versions] = await Promise.all([
-      json('/api/status'),
-      json('/api/runners'),
-      json('/api/jobs'),
-      json('/api/history?limit=50'),
-      json('/api/auth/tokens'),
-      json('/api/github'),
-      json('/api/readiness'),
-      json('/api/version'),
-    ]);
+    const requests = {
+      status: '/api/status', runners: '/api/runners', jobs: '/api/jobs',
+      history: '/api/history?limit=50', tokens: '/api/auth/tokens', github: '/api/github',
+      readiness: '/api/readiness', versions: '/api/version', diagnostics: '/api/diagnostics',
+    };
+    const entries = Object.entries(requests);
+    const results = await Promise.allSettled(entries.map(([, url]) => json(url)));
+    const failures = [];
+    results.forEach((result, index) => {
+      const name = entries[index][0];
+      if (result.status === 'fulfilled') dashboardCache[name] = result.value;
+      else failures.push(`${name}: ${result.reason?.message || result.reason}`);
+    });
+    const failureMessage = failures.join(' · ');
+    if (failureMessage && failureMessage !== lastRefreshFailure) toast(`Some dashboard data is stale: ${failureMessage}`);
+    if (!failureMessage && lastRefreshFailure) toast('Dashboard data is live again.', 'success');
+    lastRefreshFailure = failureMessage;
+    const status = dashboardCache.status;
+    if (!status) throw new Error('Status has not loaded yet.');
+    const runners = dashboardCache.runners || [];
+    const jobs = dashboardCache.jobs || [];
+    const history = dashboardCache.history || [];
+    const tokens = dashboardCache.tokens || [];
+    const github = dashboardCache.github || {configured: false, installed: false, repositories: []};
+    const readiness = dashboardCache.readiness || {ready: false, checks: {}};
+    const versions = dashboardCache.versions || {manager: 'unknown', runner: 'unknown'};
+    const diagnostics = dashboardCache.diagnostics || [];
     const badge = document.querySelector('#github-badge');
     const githubState = github.installed ? status.github : (github.configured ? 'installation pending' : 'not configured');
     badge.textContent = githubState;
@@ -101,15 +121,18 @@ async function refresh() {
     const mode = github.repository_bound ? 'repository-isolated runners' : 'shared organization runners';
     document.querySelector('#connection-details').innerHTML = github.connection
       ? `<strong>${esc(github.connection.owner)} · ${esc(mode)}</strong>`
-        + `<p class="muted">App: ${esc(github.connection.app_slug || 'manual')} · Installation: ${esc(github.connection.installation_id || 'pending')} · ${github.connection.webhook_enabled ? 'webhook + polling' : 'polling only'} · ${repositoryCount} ${repositoryCount === 1 ? 'repository' : 'repositories'}</p>`
+        + `<p class="muted">App: ${esc(github.connection.app_slug || 'manual')} · Installation: ${esc(github.connection.installation_id || 'pending')} · ${github.connection.webhook_enabled ? 'webhook + polling' : 'polling only'} · ${repositoryCount} ${repositoryCount === 1 ? 'repository' : 'repositories'}${github.rate_limit?.remaining == null ? '' : ` · GitHub API ${github.rate_limit.remaining} remaining`}</p>`
       : '<p class="muted">Paste your GitHub account or organization URL below. Repository access is selected on GitHub.</p>';
     const selection = github.connection?.repository_selection;
     const accessWarning = selection === 'all'
       ? '<p class="access-warning">GitHub granted this App access to all repositories. EasyRunners can serve matching jobs from any of them. Select only the repositories you trust.</p>'
       : '';
+    const repositoryErrors = [github.metadata_error, github.repositories_error].filter(Boolean);
     const repositoryList = github.repositories?.length
       ? `<div class="repository-list">${github.repositories.map(repository => `<span class="label">${esc(repository)}</span>`).join('')}</div>`
-      : (github.repositories_error ? `<p class="muted">Repository discovery failed: ${esc(github.repositories_error)}</p>` : '');
+      : (github.repository_bound
+        ? `<p class="access-warning">No repositories could be loaded. ${repositoryErrors.length ? esc(repositoryErrors.join(' · ')) : 'Check the App repository access on GitHub.'}</p>`
+        : '');
     const configure = github.configure_url
       ? `<a href="${esc(github.configure_url)}" target="_blank" rel="noopener">Manage repository access on GitHub</a>`
       : '';
@@ -142,29 +165,21 @@ async function refresh() {
           ${repositoryBound ? `<select name="repository" aria-label="Pre-warm repository" required>${repositoryOptions()}</select>` : ''}
           <input name="desired" type="number" min="0" max="${pool.max}" value="0" aria-label="Desired pre-warm">
           <input name="ttl" type="number" min="30" value="600" aria-label="TTL seconds">
-          <button>Pre-warm</button>
+          <button ${repositoryBound && !githubRepositories.length ? 'disabled title="No GitHub repositories are available"' : ''}>Pre-warm</button>
         </form>
         <div class="actions"><button class="secondary compact edit-pool" data-pool="${esc(name)}">Edit</button><button class="secondary compact delete-pool" data-pool="${esc(name)}">Delete</button></div>
       </article>`).join('');
 
-    const workflowPool = document.querySelector('#workflow-pool');
-    const selectedPool = workflowPool.value;
-    workflowPool.innerHTML = Object.keys(status.pools).map(name => `<option value="${esc(name)}">${esc(name)}</option>`).join('');
-    if (status.pools[selectedPool]) workflowPool.value = selectedPool;
     const quickstartPool = document.querySelector('#quickstart-pool');
     const selectedQuickstartPool = quickstartPool.value;
     quickstartPool.innerHTML = Object.keys(status.pools).map(name => `<option value="${esc(name)}">${esc(name)}</option>`).join('');
     if (status.pools[selectedQuickstartPool]) quickstartPool.value = selectedQuickstartPool;
-    const quickstartRepository = document.querySelector('#quickstart-repository');
-    const selectedQuickstartRepository = quickstartRepository.value;
-    quickstartRepository.innerHTML = repositoryOptions();
-    quickstartRepository.classList.toggle('hidden', !repositoryBound);
-    if (githubRepositories.includes(selectedQuickstartRepository)) quickstartRepository.value = selectedQuickstartRepository;
     const testRepository = document.querySelector('#test-repository');
     if (testRepository) {
       const selectedTestRepository = testRepository.value;
       testRepository.innerHTML = repositoryOptions();
       testRepository.classList.toggle('hidden', !repositoryBound);
+      testRepository.disabled = repositoryBound && !githubRepositories.length;
       if (githubRepositories.includes(selectedTestRepository)) testRepository.value = selectedTestRepository;
     }
     const testPool = document.querySelector('#test-pool');
@@ -172,6 +187,11 @@ async function refresh() {
       const selectedTestPool = testPool.value;
       testPool.innerHTML = Object.keys(status.pools).map(name => `<option value="${esc(name)}">${esc(name)}</option>`).join('');
       if (status.pools[selectedTestPool]) testPool.value = selectedTestPool;
+    }
+    const testRunnerButton = document.querySelector('#test-runner-form button');
+    if (testRunnerButton) {
+      testRunnerButton.disabled = repositoryBound && !githubRepositories.length;
+      testRunnerButton.title = testRunnerButton.disabled ? 'No GitHub repositories are available' : '';
     }
     updateRunsOn();
 
@@ -181,12 +201,15 @@ async function refresh() {
       : '<tr><td colspan="7" class="muted">No managed runners.</td></tr>';
     document.querySelector('#job-count').textContent = jobs.length;
     document.querySelector('#jobs').innerHTML = jobs.length
-      ? jobs.map(job => `<tr><td>${esc(job.name || job.id)}</td><td>${esc(job.repository)}</td><td>${job.pool ? esc(job.pool) : `<span class="unmatched">No pool matches [${job.labels.map(esc).join(', ')}]</span> <button class="secondary compact copy-replacement">Copy replacement</button>`}</td><td><span class="badge ${esc(job.status)}">${esc(job.status)}</span></td><td>${esc(job.runner_name || '—')}</td><td>${job.queued_at ? new Date(job.queued_at).toLocaleString() : '—'}</td></tr>`).join('')
+      ? jobs.map(job => `<tr><td>${esc(job.name || job.id)}${job.waiting_reason ? `<small class="job-reason">${esc(job.waiting_reason)}</small>` : ''}</td><td>${esc(job.repository)}</td><td>${job.pool ? esc(job.pool) : `<span class="unmatched">No pool matches [${job.labels.map(esc).join(', ')}]</span> <button class="secondary compact copy-replacement">Copy replacement</button>`}</td><td><span class="badge ${esc(job.status)}">${esc(job.status)}</span></td><td>${esc(job.runner_name || '—')}</td><td>${job.queued_at ? new Date(job.queued_at).toLocaleString() : '—'}</td></tr>`).join('')
       : '<tr><td colspan="6" class="muted">No queued or active jobs.</td></tr>';
     document.querySelector('#history').innerHTML = history.length
       ? history.map(job => `<tr><td>${esc(job.name || job.id)}</td><td>${esc(job.repository)}</td><td>${esc(job.pool || '—')}</td><td>${esc(job.conclusion || '—')}</td><td>${job.completed_at ? new Date(job.completed_at).toLocaleString() : '—'}</td></tr>`).join('')
       : '<tr><td colspan="5" class="muted">No completed jobs observed.</td></tr>';
-    document.querySelector('#tokens').innerHTML = tokens.map(token => `<li><span>${esc(token.name)} <small class="muted">${esc(token.id)}</small></span><button class="secondary compact revoke-token" data-id="${esc(token.id)}">Revoke</button></li>`).join('');
+    document.querySelector('#tokens').innerHTML = tokens.map(token => `<li><span>${esc(token.name)} <small class="muted">${esc(token.scope)} · ${token.expires_at ? `expires ${new Date(token.expires_at).toLocaleDateString()}` : 'no expiry'} · ${esc(token.id)}</small></span><button class="secondary compact revoke-token" data-id="${esc(token.id)}">Revoke</button></li>`).join('');
+    document.querySelector('#diagnostics').innerHTML = diagnostics.length
+      ? diagnostics.map(item => `<li><a href="/api/diagnostics/${encodeURIComponent(item.name)}">${esc(item.name)}</a><small class="muted">${Math.ceil(item.size / 1024)} KiB · ${new Date(item.modified_at).toLocaleString()}</small></li>`).join('')
+      : '<li class="muted">No runner diagnostics have been archived yet.</li>';
     bindDynamic();
   } catch (error) {
     toast(`Dashboard refresh failed: ${error.message || error}`);
@@ -197,7 +220,7 @@ async function refresh() {
 
 function fillPool(name = 'default', config = null) {
   const form = document.querySelector('#pool-form');
-  const value = config || {labels: ['self-hosted', 'linux', 'x64', name], min: 0, max: 5, cpu: 4, memory: '8g', docker_mode: 'socket'};
+  const value = config || {labels: ['self-hosted', 'linux', name], min: 0, max: 5, cpu: 4, memory: '8g', docker_mode: 'socket'};
   form.pool_name.value = name;
   form.labels.value = value.labels.join(',');
   form.min.value = value.min;
@@ -265,7 +288,12 @@ document.querySelector('#disconnect-github')?.addEventListener('click', async ()
 });
 document.querySelector('#token-form')?.addEventListener('submit', async event => {
   event.preventDefault();
-  const result = await action(() => json('/api/auth/tokens', {method: 'POST', headers, body: JSON.stringify({name: event.target.name.value})}));
+  const expires = event.target.expires_in_days.value;
+  const result = await action(() => json('/api/auth/tokens', {method: 'POST', headers, body: JSON.stringify({
+    name: event.target.name.value,
+    scope: event.target.scope.value,
+    expires_in_days: expires ? Number(expires) : null,
+  })}));
   if (!result) return;
   document.querySelector('#new-token').innerHTML = `Copy this token now; it will not be shown again: <code>${esc(result.token)}</code>`;
   event.target.reset();
@@ -307,7 +335,7 @@ document.querySelector('#pool-form')?.addEventListener('submit', async event => 
 });
 document.querySelector('#new-pool')?.addEventListener('click', () => fillPool('new-pool'));
 document.querySelector('#rust-pool')?.addEventListener('click', () => fillPool('rust', {
-  labels: ['self-hosted', 'linux', 'x64', 'rust'], min: 0, max: 5,
+  labels: ['self-hosted', 'linux', 'rust'], min: 0, max: 5,
   cpu: 4, memory: '8g', image: null, docker_mode: 'none',
 }));
 document.querySelector('#export-pools')?.addEventListener('click', async () => {
@@ -321,24 +349,6 @@ document.querySelector('#import-pools')?.addEventListener('click', async () => {
   const source = document.querySelector('#pool-yaml').value;
   const result = await action(() => json('/api/pools/config', {method: 'PUT', headers, body: JSON.stringify({yaml: source})}), 'Pool YAML imported.');
   if (result) refresh();
-});
-document.querySelector('#workflow-form')?.addEventListener('submit', async event => {
-  event.preventDefault();
-  const form = event.target;
-  const params = new URLSearchParams({template: form.template.value});
-  const repository = document.querySelector('#quickstart-repository')?.value;
-  if (repository) params.set('repository', repository);
-  const result = await action(() => json(`/api/pools/${encodeURIComponent(form.pool.value)}/workflow?${params}`));
-  if (!result) return;
-  document.querySelector('#workflow-yaml').value = result.yaml;
-  const link = document.querySelector('#create-workflow-link');
-  link.classList.toggle('hidden', !result.create_url);
-  if (result.create_url) link.href = result.create_url;
-});
-document.querySelector('#copy-workflow')?.addEventListener('click', async () => {
-  const content = document.querySelector('#workflow-yaml').value;
-  if (!content) { toast('Generate a workflow first.'); return; }
-  await action(() => navigator.clipboard.writeText(content), 'Workflow copied.');
 });
 document.querySelector('#quickstart-pool')?.addEventListener('change', updateRunsOn);
 document.querySelector('#copy-runs-on')?.addEventListener('click', async () => {

@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import platform
 from datetime import UTC, datetime
 from enum import StrEnum
 from typing import Literal
@@ -17,11 +18,34 @@ class DockerMode(StrEnum):
     NONE = "none"
 
 
-BUILTIN_LABELS = {"self-hosted", "linux", "x64"}
+class TokenScope(StrEnum):
+    METRICS = "metrics"
+    READ = "read"
+    MANAGE = "manage"
+
+
+ARCHITECTURE_LABELS = {"x64", "arm64", "arm"}
+
+
+def native_architecture_label(machine: str | None = None) -> str:
+    value = (machine or platform.machine()).lower()
+    aliases = {
+        "amd64": "x64",
+        "x86_64": "x64",
+        "aarch64": "arm64",
+        "arm64": "arm64",
+    }
+    if value not in aliases:
+        raise ValueError(f"unsupported runner architecture: {value}")
+    return aliases[value]
+
+
+NATIVE_ARCHITECTURE = native_architecture_label()
+BUILTIN_LABELS = {"self-hosted", "linux", NATIVE_ARCHITECTURE}
 
 
 class RunnerPoolConfig(BaseModel):
-    labels: list[str] = Field(default_factory=lambda: ["self-hosted", "linux", "x64"])
+    labels: list[str] = Field(default_factory=lambda: sorted(BUILTIN_LABELS))
     min: int = Field(default=0, ge=0)
     max: int = Field(default=5, ge=0)
     priority: int = 0
@@ -43,6 +67,12 @@ class RunnerPoolConfig(BaseModel):
     @classmethod
     def normalize_labels(cls, value: list[str]) -> list[str]:
         labels = list(dict.fromkeys(item.strip().lower() for item in value if item.strip()))
+        requested_architectures = set(labels) & ARCHITECTURE_LABELS
+        if requested_architectures - {NATIVE_ARCHITECTURE}:
+            requested = ", ".join(sorted(requested_architectures))
+            raise ValueError(
+                f"pool requests architecture {requested}, but this host is {NATIVE_ARCHITECTURE}"
+            )
         return sorted(BUILTIN_LABELS | set(labels))
 
     @model_validator(mode="after")
@@ -115,6 +145,8 @@ class ScaleRequest(BaseModel):
 
 class TokenCreateRequest(BaseModel):
     name: str = Field(min_length=1, max_length=80)
+    scope: TokenScope = TokenScope.READ
+    expires_in_days: int | None = Field(default=None, ge=1, le=3650)
 
 
 class GitHubSetupRequest(BaseModel):

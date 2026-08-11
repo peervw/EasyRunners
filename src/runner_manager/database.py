@@ -34,8 +34,10 @@ class Database:
                     id TEXT PRIMARY KEY,
                     name TEXT NOT NULL,
                     digest TEXT NOT NULL,
+                    scope TEXT NOT NULL DEFAULT 'manage',
                     created_at TEXT NOT NULL,
-                    last_used_at TEXT
+                    last_used_at TEXT,
+                    expires_at TEXT
                 );
                 CREATE TABLE IF NOT EXISTS webhook_deliveries (
                     delivery_id TEXT PRIMARY KEY,
@@ -53,6 +55,17 @@ class Database:
                 );
                 """
             )
+            columns = {
+                str(row["name"])
+                for row in self._conn.execute("PRAGMA table_info(api_tokens)").fetchall()
+            }
+            if "scope" not in columns:
+                self._conn.execute(
+                    "ALTER TABLE api_tokens ADD COLUMN scope TEXT NOT NULL DEFAULT 'manage'"
+                )
+            if "expires_at" not in columns:
+                self._conn.execute("ALTER TABLE api_tokens ADD COLUMN expires_at TEXT")
+            self._conn.execute("PRAGMA user_version=2")
 
     def close(self) -> None:
         with self._lock:
@@ -75,12 +88,20 @@ class Database:
         with self._lock, self._conn:
             self._conn.execute("DELETE FROM settings WHERE key = ?", (key,))
 
-    def create_api_token(self, token_id: str, name: str, digest: str) -> None:
+    def create_api_token(
+        self,
+        token_id: str,
+        name: str,
+        digest: str,
+        scope: str,
+        expires_at: str | None,
+    ) -> None:
         now = datetime.now(UTC).isoformat()
         with self._lock, self._conn:
             self._conn.execute(
-                "INSERT INTO api_tokens(id, name, digest, created_at) VALUES(?, ?, ?, ?)",
-                (token_id, name, digest, now),
+                "INSERT INTO api_tokens(id, name, digest, scope, created_at, expires_at) "
+                "VALUES(?, ?, ?, ?, ?, ?)",
+                (token_id, name, digest, scope, now, expires_at),
             )
 
     def get_api_token(self, token_id: str) -> dict[str, Any] | None:
@@ -100,7 +121,8 @@ class Database:
     def list_api_tokens(self) -> list[dict[str, Any]]:
         with self._lock:
             rows = self._conn.execute(
-                "SELECT id, name, created_at, last_used_at FROM api_tokens ORDER BY created_at DESC"
+                "SELECT id, name, scope, created_at, last_used_at, expires_at "
+                "FROM api_tokens ORDER BY created_at DESC"
             ).fetchall()
             return [dict(row) for row in rows]
 

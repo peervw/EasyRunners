@@ -74,15 +74,15 @@ In each existing workflow job, replace its hosted runner line:
 runs-on: ubuntu-latest
 
 # Docker jobs
-runs-on: [self-hosted, linux, x64, docker]
+runs-on: [self-hosted, linux, docker]
 
 # Rust jobs
-runs-on: [self-hosted, linux, x64, rust]
+runs-on: [self-hosted, linux, rust]
 ```
 
 Push the change. The dashboard shows the job as queued, creates a fresh runner for that repository,
 shows it as busy, and removes its container and workspace when the job finishes. The dashboard's
-**Use an existing workflow** section generates the exact line for every configured pool and diagnoses
+**Use an existing workflow** section shows the exact line for every configured pool and diagnoses
 jobs whose labels do not match a pool.
 
 That's it—future matching jobs scale up and clean themselves up automatically.
@@ -186,7 +186,7 @@ can also be edited in the dashboard or imported/exported as YAML. Dashboard over
 ```yaml
 runner_pools:
   default:
-    labels: [self-hosted, linux, x64, docker]
+    labels: [self-hosted, linux, docker]
     min: 0
     max: 5
     cpu: 4
@@ -196,7 +196,7 @@ runner_pools:
     docker_mode: socket
 
   rust:
-    labels: [self-hosted, linux, x64, rust]
+    labels: [self-hosted, linux, rust]
     min: 0
     max: 5
     priority: 10
@@ -205,7 +205,7 @@ runner_pools:
     docker_mode: none
 
   deploy:
-    labels: [self-hosted, linux, x64, deploy]
+    labels: [self-hosted, linux, deploy]
     min: 0
     max: 1
     priority: 10
@@ -215,21 +215,21 @@ runner_pools:
     environment_from: [DEPLOY_TOKEN]
 ```
 
-GitHub automatically assigns `self-hosted`, `Linux`, and `X64`; EasyRunners passes custom labels to
-`config.sh`. Matching is case-insensitive. When multiple pools match, the pool with the fewest extra
-labels wins, followed by highest priority and pool name. Duplicate label sets are rejected at
-startup. Give sensitive pools a unique discriminator such as `deploy`.
+GitHub automatically assigns `self-hosted`, `Linux`, and the native architecture label (`X64` or
+`ARM64`); EasyRunners detects the host architecture and passes only custom labels to
+`config.sh`. Matching is case-insensitive, and a pool that explicitly requests a different
+architecture is rejected. When multiple pools match, the pool with the fewest extra labels wins,
+followed by highest priority and pool name. Duplicate label sets are rejected at startup. Give
+sensitive pools a unique discriminator such as `deploy`.
 
 Use a pool with:
 
 ```yaml
-runs-on: [self-hosted, linux, x64, docker]
+runs-on: [self-hosted, linux, docker]
 ```
 
 See [Python CI](examples/python-ci.yaml), [Rust CI](examples/rust-ci.yaml),
-[GHCR build](examples/docker-ghcr.yaml), and [deployment](examples/deploy.yaml) examples. The
-dashboard generator creates equivalent copy-paste-ready workflows for Python, Node, Rust, Docker,
-and isolated deploy pools.
+[GHCR build](examples/docker-ghcr.yaml), and [deployment](examples/deploy.yaml) examples.
 
 ### Fast Rust jobs without a second image
 
@@ -263,10 +263,10 @@ present automatically with `min: 0`, so it consumes no runner capacity until a m
 3. In the target repository, copy `examples/rust-ci.yaml` to `.github/workflows/rust-ci.yml`, or copy
    the Rust `runs-on` line from the dashboard.
 4. Commit and push the workflow. A job requesting
-   `[self-hosted, linux, x64, rust]` queues, EasyRunners starts one ephemeral runner container, and the
+   `[self-hosted, linux, rust]` queues, EasyRunners starts one ephemeral runner container, and the
    container disappears after the job.
 
-The generated workflow assumes a committed `Cargo.lock` and a workspace compatible with
+The example workflow assumes a committed `Cargo.lock` and a workspace compatible with
 `--all-features`. Remove `--locked`, `--workspace`, or `--all-features` if the repository intentionally
 uses a different layout.
 
@@ -311,7 +311,9 @@ limits. Pool-defined host mounts deliberately weaken isolation and must be revie
 ## Dashboard, API, and metrics
 
 All management data is authenticated. Browser mutations also require CSRF validation. Create
-revocable API tokens from the dashboard and send:
+revocable, optionally expiring API tokens from the dashboard and choose the narrowest scope:
+`metrics` can only read Prometheus metrics, `read` can inspect management data, and `manage` can
+also mutate configuration. Send the token as:
 
 ```text
 Authorization: Bearer ert_...
@@ -321,8 +323,9 @@ Endpoints:
 
 - `GET /health` — intentionally minimal unauthenticated liveness
 - `GET /api/status`, `/api/runners`, `/api/pools`, `/api/history`
-- `GET /api/readiness`, `/api/version`, and `/api/pools/{pool}/workflow`
+- `GET /api/readiness` and `/api/version`
 - `GET /api/jobs` for queued and in-progress workflow jobs
+- `GET /api/diagnostics` and `/api/diagnostics/{name}` for retained runner archives
 - `PUT|DELETE /api/pools/{pool}` and YAML pool import/export endpoints
 - `POST /api/pools/{pool}/scale` with
   `{"desired": 2, "ttl_seconds": 600, "repository": "owner/repository"}`
@@ -334,7 +337,9 @@ Endpoints:
 - `POST /webhooks/github` — HMAC-SHA256 signed GitHub deliveries only
 - `GET /metrics` — Prometheus format, requiring session or bearer token
 
-Structured events include `runner.created`, `runner.online`, `runner.job_started`,
+Queued jobs include a machine-readable waiting reason such as no matching pool, runner starting,
+pool capacity reached, Docker unavailable, or GitHub unavailable. Structured events include
+`runner.created`, `runner.online`, `runner.job_started`,
 `runner.job_finished`, `runner.removed`, `github.api_error`, and `scheduler.reconcile`. Diagnostic
 archives are retained under `/data/runner-logs` for seven days by default. Treat them as sensitive.
 

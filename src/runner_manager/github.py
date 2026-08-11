@@ -16,7 +16,7 @@ from pydantic import BaseModel
 
 from runner_manager.config import Settings
 from runner_manager.database import Database
-from runner_manager.metrics import GITHUB_API_FAILURES
+from runner_manager.metrics import GITHUB_API_FAILURES, GITHUB_RATE_LIMIT_REMAINING
 from runner_manager.models import (
     GitHubConnectRequest,
     GitHubScope,
@@ -56,6 +56,10 @@ class Credentials:
     private_key: str | None = None
     webhook_secret: str | None = None
     token: str | None = None
+
+
+class GitHubRateLimitError(RuntimeError):
+    pass
 
 
 class GitHubConnectionStore:
@@ -294,6 +298,9 @@ class GitHubClient:
         self._latest_runner: tuple[float, str | None] = (0.0, None)
         self._repositories: tuple[float, list[str]] = (0.0, [])
         self._installation_metadata_at = 0.0
+        self._rate_limited_until = 0.0
+        self._rate_limit_remaining: int | None = None
+        self._rate_limit_reset_at: datetime | None = None
 
     async def close(self) -> None:
         if self._owns_client:
@@ -307,6 +314,51 @@ class GitHubClient:
     def _headers(self, token: str) -> dict[str, str]:
         return self.auth._headers(token)
 
+    def rate_limit_status(self) -> dict[str, Any]:
+        return {
+            "remaining": self._rate_limit_remaining,
+            "reset_at": self._rate_limit_reset_at.isoformat()
+            if self._rate_limit_reset_at
+            else None,
+            "limited_until": datetime.fromtimestamp(
+                self._rate_limited_until, UTC
+            ).isoformat()
+            if self._rate_limited_until > time.time()
+            else None,
+        }
+
+    def _capture_rate_limit(self, response: httpx.Response) -> None:
+        remaining = response.headers.get("x-ratelimit-remaining")
+        reset = response.headers.get("x-ratelimit-reset")
+        if remaining is not None:
+            try:
+                self._rate_limit_remaining = int(remaining)
+                GITHUB_RATE_LIMIT_REMAINING.set(self._rate_limit_remaining)
+            except ValueError:
+                pass
+        if reset is not None:
+            try:
+                self._rate_limit_reset_at = datetime.fromtimestamp(int(reset), UTC)
+            except ValueError:
+                pass
+
+    def _rate_limit_delay(self, response: httpx.Response) -> float | None:
+        if response.status_code not in {403, 429}:
+            return None
+        retry_after = response.headers.get("retry-after")
+        remaining = response.headers.get("x-ratelimit-remaining")
+        secondary = "secondary rate limit" in response.text.lower()
+        if retry_after:
+            try:
+                return max(1.0, float(retry_after))
+            except ValueError:
+                return 60.0
+        if remaining == "0" and self._rate_limit_reset_at:
+            return max(1.0, self._rate_limit_reset_at.timestamp() - time.time())
+        if secondary or response.status_code == 429:
+            return 60.0
+        return None
+
     async def request(
         self,
         method: str,
@@ -316,17 +368,44 @@ class GitHubClient:
         params: dict[str, Any] | None = None,
         json_body: dict[str, Any] | None = None,
     ) -> Any:
-        for attempt in range(2):
-            token = await self.auth.token(force_refresh=attempt == 1)
-            response = await self.http.request(
-                method,
-                f"{self.settings.github_api_url}{path}",
-                headers=self._headers(token),
-                params=params,
-                json=json_body,
-            )
-            if response.status_code == 401 and attempt == 0:
+        if self._rate_limited_until > time.time():
+            until = datetime.fromtimestamp(self._rate_limited_until, UTC).isoformat()
+            raise GitHubRateLimitError(f"GitHub API rate limit is active until {until}")
+        token = await self.auth.token()
+        authentication_retried = False
+        for attempt in range(3):
+            try:
+                response = await self.http.request(
+                    method,
+                    f"{self.settings.github_api_url}{path}",
+                    headers=self._headers(token),
+                    params=params,
+                    json=json_body,
+                )
+            except httpx.TransportError:
+                if attempt == 2:
+                    raise
+                await asyncio.sleep((0.5 * (2**attempt)) + secrets.randbelow(250) / 1000)
+                continue
+            self._capture_rate_limit(response)
+            if response.status_code == 401 and not authentication_retried:
                 self.auth.invalidate()
+                token = await self.auth.token(force_refresh=True)
+                authentication_retried = True
+                continue
+            if delay := self._rate_limit_delay(response):
+                self._rate_limited_until = time.time() + delay
+                until = datetime.fromtimestamp(self._rate_limited_until, UTC).isoformat()
+                GITHUB_API_FAILURES.labels(operation=operation, status=response.status_code).inc()
+                log.warning(
+                    "github.rate_limited",
+                    operation=operation,
+                    status=response.status_code,
+                    limited_until=until,
+                )
+                raise GitHubRateLimitError(f"GitHub API rate limit is active until {until}")
+            if response.status_code >= 500 and attempt < 2:
+                await asyncio.sleep((0.5 * (2**attempt)) + secrets.randbelow(250) / 1000)
                 continue
             if response.is_error:
                 GITHUB_API_FAILURES.labels(operation=operation, status=response.status_code).inc()
@@ -338,7 +417,7 @@ class GitHubClient:
                 )
             response.raise_for_status()
             return response.json() if response.content else None
-        raise RuntimeError("GitHub authentication retry exhausted")
+        raise RuntimeError("GitHub API retry exhausted")
 
     async def convert_manifest(self, code: str, setup: GitHubSetupRequest) -> GitHubConnection:
         response = await self.http.post(

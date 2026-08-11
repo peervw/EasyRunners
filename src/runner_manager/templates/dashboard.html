@@ -82,22 +82,11 @@
         <div class="section-heading"><h2>Use an existing workflow</h2><span class="badge">One line</span></div>
         <p>In any selected repository, replace the job's current <code>runs-on</code> line:</p>
         <div class="quickstart-line">
-          <select id="quickstart-repository" aria-label="GitHub repository"></select>
           <select id="quickstart-pool" aria-label="Runner pool"></select>
-          <code id="runs-on-line">runs-on: [self-hosted, linux, x64, docker]</code>
+          <code id="runs-on-line">runs-on: [self-hosted, linux, docker]</code>
           <button id="copy-runs-on" class="secondary">Copy line</button>
         </div>
         <p class="muted">Push the workflow and watch the job move through queued → starting → busy → complete below.</p>
-        <details>
-          <summary>Generate a complete starter workflow</summary>
-          <form id="workflow-form" class="inline-form workflow-form">
-            <select name="pool" id="workflow-pool"></select>
-            <select name="template"><option value="python">Python CI</option><option value="node">Node CI</option><option value="rust">Rust CI</option><option value="docker">Docker build</option><option value="deploy">Deploy</option></select>
-            <button>Generate</button>
-          </form>
-          <textarea id="workflow-yaml" class="code-editor" readonly spellcheck="false" placeholder="Choose a pool and generate a workflow."></textarea>
-          <div class="actions"><button id="copy-workflow" class="secondary">Copy YAML</button><a id="create-workflow-link" class="button-link hidden" target="_blank" rel="noopener">Open GitHub Actions</a></div>
-        </details>
       </section>
 
       <section class="panel"><div class="section-heading"><h2>Active runners</h2><span id="runner-count" class="badge">0</span></div><div class="table-wrap"><table><thead><tr><th>Runner</th><th>Repository</th><th>Pool</th><th>State</th><th>Uptime</th><th>Container</th><th>Labels</th></tr></thead><tbody id="runners"></tbody></table></div></section>
@@ -112,7 +101,7 @@
             <div class="section-heading"><h2>Add or edit a pool</h2><div class="actions"><button id="rust-pool" class="secondary compact">Rust preset</button><button id="new-pool" class="secondary compact">New</button></div></div>
             <form id="pool-form" class="setup-grid">
               <label>Name<input name="pool_name" value="default" pattern="[A-Za-z0-9_.-]+" required></label>
-              <label>Labels<input name="labels" value="self-hosted,linux,x64,docker" required></label>
+              <label>Labels<input name="labels" value="self-hosted,linux,docker" required></label>
               <label>Minimum<input name="min" type="number" min="0" value="0" required></label>
               <label>Maximum<input name="max" type="number" min="0" value="5" required></label>
               <label>CPU cores<input name="cpu" type="number" min="0.1" step="0.1" value="4" required></label>
@@ -128,7 +117,8 @@
               <div class="actions"><button id="export-pools" class="secondary">Export current</button><button id="import-pools">Import and replace</button></div>
             </details>
           </section>
-          <section class="nested-panel"><div class="section-heading"><h2>API tokens</h2></div><form id="token-form" class="inline-form"><input name="name" placeholder="Token name" required><button>Create token</button></form><div id="new-token"></div><ul id="tokens" class="token-list"></ul></section>
+          <section class="nested-panel"><div class="section-heading"><h2>API tokens</h2></div><form id="token-form" class="inline-form"><input name="name" placeholder="Token name" required><select name="scope" aria-label="Token scope"><option value="read">Read-only</option><option value="metrics">Metrics only</option><option value="manage">Full management</option></select><input name="expires_in_days" type="number" min="1" max="3650" placeholder="Expiry days (optional)" aria-label="Token expiry in days"><button>Create token</button></form><div id="new-token"></div><ul id="tokens" class="token-list"></ul></section>
+          <section class="nested-panel"><div class="section-heading"><h2>Runner diagnostics</h2></div><p class="muted">Download the most recent official runner diagnostic archives captured before containers were removed.</p><ul id="diagnostics" class="diagnostic-list"></ul></section>
         </div>
       </details>
     </main>

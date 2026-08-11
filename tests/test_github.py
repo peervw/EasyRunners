@@ -5,7 +5,7 @@ import pytest
 
 from runner_manager.config import Settings
 from runner_manager.database import Database
-from runner_manager.github import GitHubClient, GitHubConnectionStore
+from runner_manager.github import GitHubClient, GitHubConnectionStore, GitHubRateLimitError
 from runner_manager.models import GitHubConnectRequest, GitHubSetupRequest, RunnerPoolConfig
 
 
@@ -366,5 +366,80 @@ async def test_app_installation_discovers_multiple_repositories_and_targets_regi
         await client.registration_token("peer/../attacker")
     assert calls.count("/installation/repositories") == 1
     assert store.credentials().connection.repositories_count == 2
+    await client.close()
+    database.close()
+
+
+@pytest.mark.asyncio
+async def test_rate_limit_stops_repeat_requests_until_retry_window(tmp_path, monkeypatch) -> None:
+    calls: list[str] = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        calls.append(request.url.path)
+        if request.url.path == "/app/installations/99/access_tokens":
+            return httpx.Response(
+                201,
+                json={"token": "ghs", "expires_at": "2099-01-01T00:00:00Z"},
+            )
+        if request.url.path == "/installation/repositories":
+            return httpx.Response(
+                429,
+                headers={"Retry-After": "120", "X-RateLimit-Remaining": "0"},
+                json={"message": "rate limited"},
+            )
+        raise AssertionError(request.url)
+
+    client, store, database = make_stack(tmp_path, handler)
+    store.save_manifest_result(
+        GitHubSetupRequest(scope="repo", owner="peer"),
+        {"id": 12, "slug": "easy", "pem": "PRIVATE", "webhook_secret": "hook"},
+    )
+    store.save_installation(99)
+    monkeypatch.setattr(client.auth, "app_jwt", lambda *args: "jwt")
+    with pytest.raises(GitHubRateLimitError):
+        await client.list_repositories(refresh=True)
+    first_count = len(calls)
+    with pytest.raises(GitHubRateLimitError):
+        await client.list_repositories(refresh=True)
+    assert len(calls) == first_count
+    assert client.rate_limit_status()["limited_until"] is not None
+    await client.close()
+    database.close()
+
+
+@pytest.mark.asyncio
+async def test_server_errors_are_retried_with_backoff(tmp_path, monkeypatch) -> None:
+    attempts = 0
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        nonlocal attempts
+        if request.url.path == "/app/installations/99/access_tokens":
+            return httpx.Response(
+                201,
+                json={"token": "ghs", "expires_at": "2099-01-01T00:00:00Z"},
+            )
+        if request.url.path == "/installation/repositories":
+            attempts += 1
+            if attempts < 3:
+                return httpx.Response(503, json={"message": "unavailable"})
+            return httpx.Response(
+                200,
+                json={"repositories": [{"full_name": "peer/repo"}]},
+            )
+        raise AssertionError(request.url)
+
+    async def no_sleep(_seconds: float) -> None:
+        return None
+
+    client, store, database = make_stack(tmp_path, handler)
+    store.save_manifest_result(
+        GitHubSetupRequest(scope="repo", owner="peer"),
+        {"id": 12, "slug": "easy", "pem": "PRIVATE", "webhook_secret": "hook"},
+    )
+    store.save_installation(99)
+    monkeypatch.setattr(client.auth, "app_jwt", lambda *args: "jwt")
+    monkeypatch.setattr("runner_manager.github.asyncio.sleep", no_sleep)
+    assert await client.list_repositories(refresh=True) == ["peer/repo"]
+    assert attempts == 3
     await client.close()
     database.close()

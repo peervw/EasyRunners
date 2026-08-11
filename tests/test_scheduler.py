@@ -141,6 +141,28 @@ async def test_queued_demand_scales_and_restart_runner_is_adopted(settings, tmp_
 
 
 @pytest.mark.asyncio
+async def test_job_view_explains_when_no_pool_matches(settings, tmp_path: Path) -> None:
+    database = Database(tmp_path / "state.sqlite3")
+    demand = DemandTracker(settings.runner_pools, database)
+    await demand.apply_poll(
+        [
+            WorkflowJob(
+                id=99,
+                repository="peer/repo",
+                labels=["self-hosted", "missing-capability"],
+                status="queued",
+            )
+        ],
+        stale_after_seconds=600,
+    )
+    scheduler = Scheduler(settings, FakeGitHub(), FakeDocker(), demand)
+    jobs = await scheduler.job_views()
+    assert jobs[0]["waiting_code"] == "no_matching_pool"
+    assert "requested label" in jobs[0]["waiting_reason"]
+    database.close()
+
+
+@pytest.mark.asyncio
 async def test_personal_installation_creates_repository_bound_runners(
     settings, tmp_path: Path
 ) -> None:

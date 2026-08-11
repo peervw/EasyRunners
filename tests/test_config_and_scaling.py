@@ -5,13 +5,18 @@ from pydantic import ValidationError
 
 from runner_manager.config import Settings
 from runner_manager.demand import match_pool
-from runner_manager.models import ManagedRunner, RunnerPoolConfig
+from runner_manager.models import NATIVE_ARCHITECTURE, ManagedRunner, RunnerPoolConfig
 from runner_manager.scheduler import calculate_scale
 
 
 def test_pool_normalizes_effective_and_custom_labels() -> None:
     pool = RunnerPoolConfig(labels=["Docker", "linux", "DOCKER"])
-    assert pool.effective_labels == {"self-hosted", "linux", "x64", "docker"}
+    assert pool.effective_labels == {
+        "self-hosted",
+        "linux",
+        NATIVE_ARCHITECTURE,
+        "docker",
+    }
     assert pool.custom_labels == ["docker"]
 
 
@@ -29,6 +34,12 @@ def test_pool_rejects_invalid_limits() -> None:
         RunnerPoolConfig(min=3, max=2)
     with pytest.raises(ValidationError, match="max_lifetime"):
         RunnerPoolConfig(job_timeout=1000, max_lifetime=999)
+
+
+def test_pool_rejects_architecture_that_does_not_match_host() -> None:
+    other = "arm64" if NATIVE_ARCHITECTURE == "x64" else "x64"
+    with pytest.raises(ValidationError, match="this host"):
+        RunnerPoolConfig(labels=["docker", other])
 
 
 def test_settings_reject_identical_pool_label_sets(tmp_path) -> None:

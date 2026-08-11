@@ -4,7 +4,7 @@ import hashlib
 import hmac
 import secrets
 from collections import defaultdict, deque
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from typing import Any
 
@@ -15,6 +15,7 @@ from itsdangerous import BadSignature, SignatureExpired, URLSafeTimedSerializer
 
 from runner_manager.config import Settings
 from runner_manager.database import Database
+from runner_manager.models import TokenScope
 
 log = structlog.get_logger()
 
@@ -136,21 +137,44 @@ class AuthManager:
     def _token_digest(token: str) -> str:
         return hashlib.sha256(token.encode()).hexdigest()
 
-    def create_api_token(self, name: str) -> tuple[str, dict[str, Any]]:
+    def create_api_token(
+        self,
+        name: str,
+        scope: TokenScope = TokenScope.READ,
+        expires_in_days: int | None = None,
+    ) -> tuple[str, dict[str, Any]]:
         token_id = secrets.token_hex(6)
         token = f"ert_{token_id}_{secrets.token_urlsafe(32)}"
-        self.database.create_api_token(token_id, name, self._token_digest(token))
+        expires_at = (
+            (datetime.now(UTC) + timedelta(days=expires_in_days)).isoformat()
+            if expires_in_days
+            else None
+        )
+        self.database.create_api_token(
+            token_id,
+            name,
+            self._token_digest(token),
+            scope.value,
+            expires_at,
+        )
         record = next(item for item in self.database.list_api_tokens() if item["id"] == token_id)
         return token, record
 
-    def verify_api_token(self, token: str) -> bool:
+    def authenticate_api_token(self, token: str) -> dict[str, Any] | None:
         parts = token.split("_", 2)
         if len(parts) != 3 or parts[0] != "ert":
-            return False
+            return None
         record = self.database.get_api_token(parts[1])
         if not record:
-            return False
+            return None
+        expires_at = record.get("expires_at")
+        if expires_at and datetime.fromisoformat(str(expires_at)) <= datetime.now(UTC):
+            return None
         valid = hmac.compare_digest(str(record["digest"]), self._token_digest(token))
         if valid:
             self.database.touch_api_token(parts[1])
-        return valid
+            return record
+        return None
+
+    def verify_api_token(self, token: str) -> bool:
+        return self.authenticate_api_token(token) is not None
