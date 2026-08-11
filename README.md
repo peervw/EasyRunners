@@ -51,9 +51,8 @@ docker compose up -d --build
 docker compose logs manager
 ```
 
-That is the only Compose file. It builds from the checkout when `--build` is present. Once the public
-GHCR images are available, the same `compose.yaml` can pull them with `docker compose pull` and run
-them with `docker compose up -d --no-build`.
+That is the only Compose file. It always builds the manager, standard runner, and Rust runner from
+the checked-out commit. No container registry login or separately published images are required.
 
 In Dokploy, choose `compose.yaml`, set `PUBLIC_URL` in the environment, and deploy. The Compose file
 already declares the persistent data volume and Docker socket; do not add another volume in the
@@ -310,14 +309,7 @@ The dashboard compares the pinned runner version with GitHub's latest release an
 differ. It deliberately does not update automatically because runner releases use a progressive
 rollout.
 
-Published-image update:
-
-```bash
-docker compose pull
-docker compose up -d --no-build
-```
-
-Source-build update:
+Update and rebuild from source:
 
 ```bash
 git pull --ff-only
@@ -330,13 +322,6 @@ every ephemeral container. To update it, change `RUNNER_VERSION`, `RUNNER_SHA256
 [actions/runner releases page](https://github.com/actions/runner/releases), then rebuild. GitHub uses
 a progressive rollout, so verify the expected version in the repository or organization's **Add new
 self-hosted runner** page before updating.
-
-Tag pushes run `.github/workflows/release-images.yml`, producing amd64/arm64 manager, base-runner,
-and Rust-runner images in GHCR with SBOMs, provenance attestations, and keyless Cosign signatures.
-Change the image namespace in `compose.yaml` when publishing from a fork. That workflow must run once
-before the pull-only path exists in a new registry. The publishing workflow uses the trusted
-`[self-hosted, linux, x64, docker]` pool, so include the EasyRunners repository in the App installation
-before creating a release tag.
 
 ## Backup and restore
 
