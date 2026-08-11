@@ -48,3 +48,14 @@
 .toast.success { border-color: #2a8d69; color: #b7f5df; }
 details { margin-top: 18px; }
 summary { cursor: pointer; color: var(--muted); }
+.quickstart-line { display: flex; gap: 10px; align-items: center; flex-wrap: wrap; }
+.quickstart-line code { padding: 11px 13px; color: var(--accent); overflow-x: auto; }
+.repository-list { display: flex; flex-wrap: wrap; gap: 6px; margin: 12px 0; }
+.access-warning { border: 1px solid #745d26; border-radius: 8px; padding: 10px; color: var(--warning); }
+.workflow-form { margin-top: 14px; }
+.unmatched { color: var(--warning); white-space: normal; }
+.advanced-panel > summary { font-size: 16px; }
+.advanced-content { margin-top: 18px; }
+.nested-panel { border-top: 1px solid var(--line); padding-top: 20px; margin-top: 20px; }
+.setup-advanced { margin: 0; }
+.connection-actions { align-items: center; flex-wrap: wrap; }

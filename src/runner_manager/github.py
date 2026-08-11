@@ -38,12 +38,16 @@ class GitHubConnection(BaseModel):
     app_slug: str | None = None
     source: str = "environment"
     webhook_enabled: bool = True
+    repository_selection: str | None = None
+    repositories_count: int | None = None
 
     @property
     def target_name(self) -> str:
         if self.scope == GitHubScope.ORG:
             return self.organization or self.owner
-        return f"{self.owner}/{self.repository}"
+        if self.repository:
+            return f"{self.owner}/{self.repository}"
+        return self.owner
 
 
 @dataclass(frozen=True)
@@ -166,11 +170,37 @@ class GitHubConnectionStore:
         self.database.delete_setting("webhook_last_received_at")
         return connection
 
-    def save_installation(self, installation_id: int | None) -> GitHubConnection:
+    def save_installation(
+        self,
+        installation_id: int | None,
+        *,
+        repository_selection: str | None = None,
+        repositories_count: int | None = None,
+    ) -> GitHubConnection:
         credentials = self.credentials(require_installation=False)
         if not credentials:
             raise RuntimeError("GitHub App manifest has not been completed")
-        connection = credentials.connection.model_copy(update={"installation_id": installation_id})
+        updates: dict[str, Any] = {"installation_id": installation_id}
+        if repository_selection is not None:
+            updates["repository_selection"] = repository_selection
+        if repositories_count is not None:
+            updates["repositories_count"] = repositories_count
+        connection = credentials.connection.model_copy(update=updates)
+        self.database.set_setting("github_connection", connection.model_dump_json())
+        return connection
+
+    def update_repository_metadata(
+        self, *, repository_selection: str | None = None, repositories_count: int | None = None
+    ) -> GitHubConnection:
+        credentials = self.credentials(require_installation=False)
+        if not credentials:
+            raise RuntimeError("GitHub is not connected")
+        updates: dict[str, Any] = {}
+        if repository_selection is not None:
+            updates["repository_selection"] = repository_selection
+        if repositories_count is not None:
+            updates["repositories_count"] = repositories_count
+        connection = credentials.connection.model_copy(update=updates)
         self.database.set_setting("github_connection", connection.model_dump_json())
         return connection
 
@@ -262,10 +292,17 @@ class GitHubClient:
         self._owns_client = client is None
         self.auth = GitHubAuth(settings, store, self.http)
         self._latest_runner: tuple[float, str | None] = (0.0, None)
+        self._repositories: tuple[float, list[str]] = (0.0, [])
+        self._installation_metadata_at = 0.0
 
     async def close(self) -> None:
         if self._owns_client:
             await self.http.aclose()
+
+    def invalidate_connection_cache(self) -> None:
+        self.auth.invalidate()
+        self._repositories = (0.0, [])
+        self._installation_metadata_at = 0.0
 
     def _headers(self, token: str) -> dict[str, str]:
         return self.auth._headers(token)
@@ -313,6 +350,7 @@ class GitHubClient:
             },
         )
         response.raise_for_status()
+        self.invalidate_connection_cache()
         return self.store.save_manifest_result(setup, response.json())
 
     def build_manifest(self, setup: GitHubSetupRequest) -> dict[str, Any]:
@@ -354,12 +392,10 @@ class GitHubClient:
             scope = GitHubScope.ORG
             repository = None
         else:
-            if len(parts) < 2:
-                raise ValueError(
-                    "a repository URL is required unless organization-wide is selected"
-                )
             scope = GitHubScope.REPO
-            repository = parts[1].removesuffix(".git")
+            # Repository access is selected on GitHub's installation screen. A repository URL is
+            # accepted for convenience, but only its account owner is needed or persisted.
+            repository = None
         response = await self.http.get(
             f"{self.settings.github_api_url}/users/{owner}",
             headers={
@@ -400,72 +436,148 @@ class GitHubClient:
         actual = str(installation.get("account", {}).get("login", "")).lower()
         if actual != expected:
             raise ValueError("installation account does not match the configured target")
-        self.store.save_installation(installation_id)
+        selection = str(installation.get("repository_selection") or "") or None
+        self.store.save_installation(
+            installation_id,
+            repository_selection=selection,
+        )
         self.auth.invalidate()
+        self._repositories = (0.0, [])
+        self._installation_metadata_at = time.monotonic()
         if credentials.connection.scope == GitHubScope.REPO:
             try:
-                await self.request(
-                    "GET",
-                    f"/repos/{credentials.connection.target_name}",
-                    operation="validate_repository_access",
-                )
+                if credentials.connection.repository:
+                    await self.request(
+                        "GET",
+                        f"/repos/{credentials.connection.target_name}",
+                        operation="validate_repository_access",
+                    )
+                elif not await self.list_repositories(refresh=True):
+                    raise ValueError(
+                        "select at least one repository for the GitHub App installation"
+                    )
             except httpx.HTTPStatusError as exc:
                 self.store.save_installation(None)
                 self.auth.invalidate()
                 raise ValueError(
                     "the GitHub App was not granted access to the selected repository"
                 ) from exc
+            except ValueError:
+                self.store.save_installation(None)
+                self.auth.invalidate()
+                raise
         return installation
 
-    def _target_path(self, suffix: str) -> str:
+    def _target_path(self, suffix: str, repository: str | None = None) -> str:
         credentials = self.store.credentials()
         if not credentials:
             raise RuntimeError("GitHub is not connected")
         connection = credentials.connection
         if connection.scope == GitHubScope.ORG:
             return f"/orgs/{connection.organization or connection.owner}/actions/{suffix}"
-        return f"/repos/{connection.owner}/{connection.repository}/actions/{suffix}"
+        target = self._repository_target(connection, repository)
+        return f"/repos/{target}/actions/{suffix}"
 
-    def target_url(self) -> str:
+    @staticmethod
+    def _repository_target(
+        connection: GitHubConnection, repository: str | None = None
+    ) -> str:
+        target = repository or connection.target_name
+        parts = target.split("/")
+        if (
+            len(parts) != 2
+            or parts[0].lower() != connection.owner.lower()
+            or not parts[1]
+            or any(
+                character
+                not in "abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789_.-"
+                for character in parts[1]
+            )
+        ):
+            raise ValueError("runner repository does not belong to the connected account")
+        return target
+
+    def target_url(self, repository: str | None = None) -> str:
         credentials = self.store.credentials()
         if not credentials:
             raise RuntimeError("GitHub is not connected")
         connection = credentials.connection
         if connection.scope == GitHubScope.ORG:
             return f"{self.settings.github_web_url}/{connection.organization or connection.owner}"
-        return f"{self.settings.github_web_url}/{connection.owner}/{connection.repository}"
+        return f"{self.settings.github_web_url}/{self._repository_target(connection, repository)}"
 
-    async def registration_token(self) -> str:
+    async def registration_token(self, repository: str | None = None) -> str:
         body = await self.request(
             "POST",
-            self._target_path("runners/registration-token"),
+            self._target_path("runners/registration-token", repository),
             operation="registration_token",
         )
         return str(body["token"])
 
-    async def list_runners(self) -> list[dict[str, Any]]:
-        body = await self.request(
-            "GET",
-            self._target_path("runners"),
-            operation="list_runners",
-            params={"per_page": 100},
-        )
-        return list(body.get("runners", []))
-
-    async def delete_runner(self, runner_id: int) -> None:
-        await self.request(
-            "DELETE",
-            self._target_path(f"runners/{runner_id}"),
-            operation="delete_runner",
-        )
-
-    async def list_repositories(self) -> list[str]:
+    async def list_runners(
+        self, repositories: list[str] | None = None
+    ) -> list[dict[str, Any]]:
         credentials = self.store.credentials()
         if not credentials:
             return []
         connection = credentials.connection
-        if connection.scope == GitHubScope.REPO:
+        if connection.scope == GitHubScope.ORG:
+            body = await self.request(
+                "GET",
+                self._target_path("runners"),
+                operation="list_runners",
+                params={"per_page": 100},
+            )
+            return list(body.get("runners", []))
+        targets = repositories
+        if targets is None:
+            targets = await self.list_repositories()
+        semaphore = asyncio.Semaphore(self.settings.poll_concurrency)
+
+        async def scan(repository: str) -> list[dict[str, Any]]:
+            async with semaphore:
+                body = await self.request(
+                    "GET",
+                    self._target_path("runners", repository),
+                    operation="list_runners",
+                    params={"per_page": 100},
+                )
+                return [dict(runner, repository=repository) for runner in body.get("runners", [])]
+
+        results = await asyncio.gather(*(scan(repo) for repo in targets), return_exceptions=True)
+        runners: list[dict[str, Any]] = []
+        failures: list[BaseException] = []
+        for repository, result in zip(targets, results, strict=True):
+            if isinstance(result, BaseException):
+                failures.append(result)
+                log.warning(
+                    "github.list_runners_failed", repository=repository, error=str(result)
+                )
+            else:
+                runners.extend(result)
+        if targets and len(failures) == len(targets):
+            raise RuntimeError(
+                "GitHub runner discovery failed for every selected repository"
+            ) from failures[0]
+        return runners
+
+    async def delete_runner(self, runner_id: int, repository: str | None = None) -> None:
+        await self.request(
+            "DELETE",
+            self._target_path(f"runners/{runner_id}", repository),
+            operation="delete_runner",
+        )
+
+    async def list_repositories(self, *, refresh: bool = False) -> list[str]:
+        credentials = self.store.credentials()
+        if not credentials:
+            return []
+        connection = credentials.connection
+        if connection.scope == GitHubScope.REPO and connection.auth_type != "app":
             return [connection.target_name]
+        cached_at, cached = self._repositories
+        if not refresh and cached_at and time.monotonic() - cached_at < 60:
+            return list(cached)
         if connection.auth_type == "app":
             path = "/installation/repositories"
         else:
@@ -488,9 +600,41 @@ class GitHubClient:
             if len(items) < 100 or len(repositories) >= self.settings.poll_max_repositories:
                 break
         prefix = f"{connection.organization or connection.owner}/".lower()
-        return [repo for repo in repositories if repo.lower().startswith(prefix)][
+        selected = [repo for repo in repositories if repo.lower().startswith(prefix)][
             : self.settings.poll_max_repositories
         ]
+        self._repositories = (time.monotonic(), selected)
+        if connection.repositories_count != len(selected):
+            self.store.update_repository_metadata(repositories_count=len(selected))
+        return list(selected)
+
+    async def refresh_installation_metadata(self, *, refresh: bool = False) -> GitHubConnection:
+        credentials = self.store.credentials(require_installation=False)
+        if not credentials:
+            raise RuntimeError("GitHub is not connected")
+        connection = credentials.connection
+        if not (
+            connection.auth_type == "app"
+            and connection.app_id
+            and connection.installation_id
+            and credentials.private_key
+        ):
+            return connection
+        if not refresh and time.monotonic() - self._installation_metadata_at < 60:
+            return connection
+        app_token = self.auth.app_jwt(connection.app_id, credentials.private_key)
+        response = await self.http.get(
+            f"{self.settings.github_api_url}/app/installations/{connection.installation_id}",
+            headers=self._headers(app_token),
+        )
+        response.raise_for_status()
+        selection = str(response.json().get("repository_selection") or "") or None
+        self._installation_metadata_at = time.monotonic()
+        if selection != connection.repository_selection:
+            connection = self.store.update_repository_metadata(
+                repository_selection=selection,
+            )
+        return connection
 
     async def queued_jobs(self, repositories: list[str] | None = None) -> list[WorkflowJob]:
         repos = repositories or await self.list_repositories()

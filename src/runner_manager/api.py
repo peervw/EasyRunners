@@ -346,7 +346,12 @@ async def api_scale(
     _: Annotated[AuthContext, Depends(require_mutation)],
 ) -> dict[str, Any]:
     try:
-        await _scheduler(request).set_manual_floor(pool, body.desired, body.ttl_seconds)
+        await _scheduler(request).set_manual_floor(
+            pool,
+            body.desired,
+            body.ttl_seconds,
+            body.repository,
+        )
     except KeyError as exc:
         raise HTTPException(status_code=404, detail="unknown pool") from exc
     except ValueError as exc:
@@ -414,13 +419,16 @@ async def api_test_runner(
     request: Request,
     _: Annotated[AuthContext, Depends(require_mutation)],
     pool: str | None = None,
+    repository: str | None = None,
 ) -> dict[str, Any]:
     if not _store(request).credentials():
         raise HTTPException(status_code=409, detail="complete the GitHub App installation first")
     try:
-        return await _scheduler(request).test_runner(pool)
+        return await _scheduler(request).test_runner(pool, repository)
     except KeyError as exc:
         raise HTTPException(status_code=404, detail="unknown pool") from exc
+    except ValueError as exc:
+        raise HTTPException(status_code=422, detail=str(exc)) from exc
 
 
 @router.get("/api/version")
@@ -430,7 +438,7 @@ async def api_version(
     try:
         manager_version = version("easy-runners")
     except PackageNotFoundError:
-        manager_version = "0.1.0-dev"
+        manager_version = "0.2.0-dev"
     current = request.app.state.settings.runner_version
     latest = await _github(request).latest_runner_version()
     return {
@@ -449,6 +457,7 @@ async def api_workflow(
     pool: str,
     _: Annotated[AuthContext, Depends(require_auth)],
     template: str = "python",
+    repository: str | None = None,
 ) -> dict[str, Any]:
     config = _scheduler(request).settings.runner_pools.get(pool)
     if not config:
@@ -460,10 +469,21 @@ async def api_workflow(
     credentials = _store(request).credentials(require_installation=False)
     create_url = None
     if credentials and credentials.connection.scope == GitHubScope.REPO:
-        create_url = (
-            f"{_github(request).settings.github_web_url}/"
-            f"{credentials.connection.target_name}/actions/new"
+        selected = await _github(request).list_repositories()
+        requested = repository
+        if not requested and credentials.connection.repository:
+            requested = credentials.connection.target_name
+        match = next(
+            (item for item in selected if requested and item.lower() == requested.lower()),
+            None,
         )
+        if repository and not match:
+            raise HTTPException(
+                status_code=422,
+                detail="repository is not selected in the GitHub App installation",
+            )
+        if match:
+            create_url = f"{_github(request).settings.github_web_url}/{match}/actions/new"
     return {"filename": f"{template}.yml", "yaml": content, "create_url": create_url}
 
 
@@ -500,10 +520,30 @@ async def api_github(
     request: Request, _: Annotated[AuthContext, Depends(require_auth)]
 ) -> dict[str, Any]:
     credentials = _store(request).credentials(require_installation=False)
+    repositories: list[str] = []
+    repositories_error: str | None = None
+    if credentials and credentials.connection.installation_id:
+        try:
+            await _github(request).refresh_installation_metadata()
+            repositories = await _github(request).list_repositories()
+        except (httpx.HTTPError, RuntimeError, ValueError) as exc:
+            repositories_error = str(exc)
+        credentials = _store(request).credentials(require_installation=False)
+    connection = credentials.connection if credentials else None
+    configure_url = None
+    if connection and connection.installation_id:
+        configure_url = (
+            f"{_github(request).settings.github_web_url}/settings/installations/"
+            f"{connection.installation_id}"
+        )
     return {
         "configured": bool(credentials),
-        "installed": bool(credentials and credentials.connection.installation_id),
-        "connection": credentials.connection.model_dump(mode="json") if credentials else None,
+        "installed": bool(connection and connection.installation_id),
+        "connection": connection.model_dump(mode="json") if connection else None,
+        "repositories": repositories,
+        "repositories_error": repositories_error,
+        "configure_url": configure_url,
+        "repository_bound": bool(connection and connection.scope == GitHubScope.REPO),
     }
 
 
@@ -611,7 +651,7 @@ async def github_disconnect(
     _: Annotated[AuthContext, Depends(require_mutation)],
 ) -> Response:
     _store(request).disconnect()
-    _github(request).auth.invalidate()
+    _github(request).invalidate_connection_cache()
     return Response(status_code=204)
 
 
@@ -650,11 +690,13 @@ async def github_webhook(request: Request) -> JSONResponse:
         WEBHOOK_FAILURES.labels(reason="installation").inc()
         raise HTTPException(status_code=403, detail="webhook installation does not match")
     repository = str(payload.get("repository", {}).get("full_name", ""))
-    if (
-        connection.scope == GitHubScope.REPO
-        and repository.lower() != connection.target_name.lower()
-    ):
-        raise HTTPException(status_code=403, detail="webhook repository does not match")
+    if connection.scope == GitHubScope.REPO:
+        if connection.auth_type == "app":
+            parts = repository.split("/")
+            if len(parts) != 2 or parts[0].lower() != connection.owner.lower():
+                raise HTTPException(status_code=403, detail="webhook owner does not match")
+        elif repository.lower() != connection.target_name.lower():
+            raise HTTPException(status_code=403, detail="webhook repository does not match")
     if connection.scope == GitHubScope.ORG and not repository.lower().startswith(
         f"{connection.organization or connection.owner}/".lower()
     ):

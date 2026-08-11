@@ -43,6 +43,7 @@ services:
       - path: .env
         required: false
     environment:
+      PUBLIC_URL: ${PUBLIC_URL:?Set PUBLIC_URL to the canonical HTTPS dashboard URL}
       MANAGER_PORT: "8080"
       CONFIG_PATH: /app/config.yaml
       DATA_DIR: /data
@@ -56,8 +57,6 @@ services:
     volumes:
       - /var/run/docker.sock:/var/run/docker.sock
       - easy-runners-data:/data
-      - ./config.yaml:/app/config.yaml:ro
-      - ./secrets:/run/secrets:ro
     networks:
       - easy-runners
     read_only: true

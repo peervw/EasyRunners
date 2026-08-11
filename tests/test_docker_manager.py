@@ -74,7 +74,9 @@ async def test_create_runner_applies_security_and_resources(settings) -> None:
         runner_group="Deploy",
         environment={"PLAIN": "value"},
     )
-    runner = await manager.create_runner("deploy", pool, "secret-token", "https://github.com/o")
+    runner = await manager.create_runner(
+        "deploy", pool, "secret-token", "https://github.com/o/repo", "o/repo"
+    )
     kwargs = client.containers.kwargs
     assert kwargs and kwargs["privileged"] is False
     assert kwargs["cap_drop"] == ["ALL"]
@@ -87,7 +89,9 @@ async def test_create_runner_applies_security_and_resources(settings) -> None:
     assert kwargs["environment"]["RUNNER_TOKEN"].endswith("-token")
     assert kwargs["environment"]["RUNNER_LABELS"] == "deploy,docker"
     assert kwargs["environment"]["RUNNER_GROUP"] == "Deploy"
+    assert kwargs["labels"]["com.easy-runners.repository"] == "o/repo"
     assert runner.pool == "deploy"
+    assert runner.repository == "o/repo"
 
 
 @pytest.mark.asyncio

@@ -34,51 +34,66 @@ manager can adopt or clean them after a restart. See [the architecture decision]
 - x86_64 or ARM64 Ubuntu, or another modern Linux distribution
 - Docker Engine and Docker Compose v2
 - A browser-reachable HTTPS URL (public for webhooks, private/LAN is fine for polling-only mode)
-- A trusted GitHub repository or organization
+- One or more trusted GitHub repositories, or a GitHub organization
 
 Downloading and configuring GitHub's runner means accepting the applicable
 [GitHub Customer Agreement](https://github.com/customer-terms).
 
 ## Quick start
 
+### 1. Run Compose
+
 ```bash
-git clone <this-repository-url> easy-runners
+git clone https://github.com/peervw/EasyRunners.git easy-runners
 cd easy-runners
-cp .env.example .env
-```
-
-Set at least this value in `.env`:
-
-```env
-PUBLIC_URL=https://runners.example.com
-```
-
-For the easiest install, use the published multi-architecture images:
-
-```bash
-docker compose -f compose.prebuilt.yaml up -d
-docker compose logs manager
-```
-
-Until images have been published for your fork or registry, build them locally:
-
-```bash
+export PUBLIC_URL=https://runners.example.com
 docker compose up -d --build
 docker compose logs manager
 ```
 
-Make the GHCR packages public for passwordless installs; private packages require signing in to
-`ghcr.io` with Docker before the prebuilt command.
+That is the only Compose file. It always builds the manager, standard runner, and Rust runner from
+the checked-out commit. No container registry login or separately published images are required.
+
+In Dokploy, choose `compose.yaml`, set `PUBLIC_URL` in the environment, and deploy. The Compose file
+already declares the persistent data volume and Docker socket; do not add another volume in the
+advanced settings. Route the public HTTPS domain to the `manager` service on port 8080.
+
+### 2. Connect GitHub
 
 The first boot prints an `auth.bootstrap_password` JSON event exactly once. Open `PUBLIC_URL`, sign
-in with that password, and replace it with a password of at least 14 characters. Paste a repository
-URL such as `https://github.com/peervw/prediction-market`, then select **Connect GitHub**:
+in with that password, and replace it with a password of at least 14 characters. Paste the account
+URL, such as `https://github.com/peervw`, then select **Connect GitHub**:
 
-1. EasyRunners detects the owner, repository, and account type from the URL.
-2. Optionally select organization-wide operation and webhook or polling-only scaling.
-3. GitHub creates the preconfigured private App and asks where to install it.
-4. Select only the repositories that should use these runners.
-5. Return to the readiness checklist and click **Test a runner**.
+1. EasyRunners detects the account and whether it is a user or organization.
+2. GitHub creates the preconfigured private App and asks where to install it.
+3. Choose **Only select repositories** and select every trusted repository that should use these
+   runners.
+4. Return to the dashboard; all selected repositories appear under **GitHub connection**.
+
+For personal accounts, EasyRunners creates repository-specific runners: a job from repository A
+cannot run on a runner registered to repository B. One App installation can still serve every
+repository selected on GitHub. For organizations, the optional shared-runner mode registers at the
+organization level and should be restricted with GitHub runner groups.
+
+### 3. Change one workflow line
+
+In each existing workflow job, replace its hosted runner line:
+
+```yaml
+# before
+runs-on: ubuntu-latest
+
+# Docker jobs
+runs-on: [self-hosted, linux, x64, docker]
+
+# Rust jobs
+runs-on: [self-hosted, linux, x64, rust]
+```
+
+Push the change. The dashboard shows the job as queued, creates a fresh runner for that repository,
+shows it as busy, and removes its container and workspace when the job finishes. The dashboard's
+**Use an existing workflow** section generates the exact line for every configured pool and diagnoses
+jobs whose labels do not match a pool.
 
 If login expires or the browser is closed during setup, sign in again and use **Continue GitHub
 installation**. **Start over** clears the local connection; remove an abandoned App separately in
@@ -114,20 +129,23 @@ The manifest requests only the permissions required by the selected scope:
 
 | Scope | GitHub App permission | Why |
 |---|---|---|
-| Repository | Actions: read | Receive `workflow_job` and reconcile workflow jobs |
-| Repository | Administration: write | Create/list/delete self-hosted runner registrations |
+| Selected repositories | Actions: read | Receive `workflow_job` and reconcile workflow jobs |
+| Selected repositories | Administration: write | Create/list/delete repository-specific runner registrations |
 | Organization | Actions: read | Observe jobs in installed repositories |
 | Organization | Self-hosted runners: write | Create/list/delete organization runners |
 
 The App subscribes only to `workflow_job`. GitHub's registration token expires after one hour;
-EasyRunners obtains a fresh one for every container. Organization owners should use GitHub runner
-groups and selected-repository policies to restrict access.
+EasyRunners obtains a fresh token for the requesting repository for every container. The dashboard
+shows GitHub's selected repository list and warns when the installation is granted **All
+repositories**. Organization owners should also use runner groups and selected-repository policies.
 
 ### Manual GitHub App or PAT setup
 
-For headless installations set `GITHUB_AUTH_MODE=app` and provide `GITHUB_SCOPE`, target fields,
+For headless installations set `GITHUB_AUTH_MODE=app` and provide `GITHUB_SCOPE`, account fields,
 `GITHUB_APP_ID`, `GITHUB_INSTALLATION_ID`, and `GITHUB_APP_PRIVATE_KEY_PATH`. Mount the PEM into the
-manager container if it is not in `/data`.
+manager container if it is not in `/data`. `GITHUB_REPO` is optional for App authentication because
+the installation's selected repositories are discovered automatically; PAT repository mode still
+requires it.
 
 For development only, set `GITHUB_AUTH_MODE=pat` and `GITHUB_TOKEN`. Classic PATs require `repo` for
 private repositories or `admin:org` for organization runners. GitHub Apps are recommended because
@@ -135,7 +153,7 @@ their installation tokens are short-lived and repository access is explicit.
 
 ## Runner pools and labels
 
-Normal settings live in `config.yaml`; secrets remain in the environment or protected data volume.
+Image defaults live in `config.yaml`; secrets remain in the environment or protected data volume.
 Pools can also be added and edited in the dashboard or imported/exported as YAML. Dashboard
 overrides persist in `/data` and take precedence after restart. A pool is an independently bounded
 capacity class:
@@ -211,12 +229,11 @@ present automatically with `min: 0`, so it consumes no runner capacity until a m
 
 ### Connect a Rust repository
 
-1. In EasyRunners, connect or reconnect the GitHub App using the repository URL, for example
-   `https://github.com/peervw/prediction-market`. Ensure that repository is selected during App
-   installation.
+1. In the GitHub App installation, ensure the Rust repository is selected. Reconnecting EasyRunners
+   is not necessary when adding another repository to the same installation.
 2. Confirm that the dashboard readiness check finds the Rust image and that the `rust` pool appears.
-3. In the target repository, copy `examples/rust-ci.yaml` to `.github/workflows/rust-ci.yml`, or use
-   **Create a workflow → Rust CI** in the dashboard.
+3. In the target repository, copy `examples/rust-ci.yaml` to `.github/workflows/rust-ci.yml`, or copy
+   the Rust `runs-on` line from the dashboard.
 4. Commit and push the workflow. A job requesting
    `[self-hosted, linux, x64, rust]` queues, EasyRunners starts one ephemeral Rust container, and the
    container disappears after the job.
@@ -228,12 +245,18 @@ uses a different layout.
 ### Scaling behavior
 
 - `workflow_job` webhooks trigger immediate reconciliation.
-- Repository-scoped REST polling repairs missed events and restores demand after restart.
+- REST polling enumerates the App installation's selected repositories to repair missed events and
+  restore demand after restart.
+- Personal-account capacity is repository-bound. Pool maximums apply across all selected
+  repositories, and the oldest queued matching jobs receive available slots first.
+- A non-zero pool minimum uses the first selected repository; explicit dashboard pre-warming names
+  the repository and is clearer for multi-repository installations.
 - Organization polling enumerates App installation repositories because GitHub has no single API
   endpoint for all queued organization jobs grouped by runner labels.
 - Starting containers count toward capacity. Busy runners are never stopped for ordinary scale-down.
 - Idle excess waits for `idle_timeout` and an assignment grace period.
-- Dashboard pre-warming is a temporary desired-capacity floor, not a permanent config change.
+- Dashboard pre-warming is a temporary desired-capacity floor, not a permanent config change. A
+  personal-account pre-warm always names its repository explicitly.
 - Exactly one manager replica is supported.
 
 ## Docker builds and security
@@ -273,8 +296,10 @@ Endpoints:
 - `GET /api/readiness`, `/api/version`, and `/api/pools/{pool}/workflow`
 - `GET /api/jobs` for queued and in-progress workflow jobs
 - `PUT|DELETE /api/pools/{pool}` and YAML pool import/export endpoints
-- `POST /api/pools/{pool}/scale` with `{"desired": 2, "ttl_seconds": 600}`
-- `POST /api/readiness/test-runner` to pre-warm one runner for five minutes
+- `POST /api/pools/{pool}/scale` with
+  `{"desired": 2, "ttl_seconds": 600, "repository": "owner/repository"}`
+- `POST /api/readiness/test-runner?pool=rust&repository=owner/repository` to pre-warm one runner for
+  five minutes
 - `POST /api/reconcile`
 - `GET|POST /api/auth/tokens` and `DELETE /api/auth/tokens/{id}`
 - `GET /api/github`, setup/disconnect routes
@@ -291,14 +316,7 @@ The dashboard compares the pinned runner version with GitHub's latest release an
 differ. It deliberately does not update automatically because runner releases use a progressive
 rollout.
 
-Prebuilt-image update:
-
-```bash
-docker compose -f compose.prebuilt.yaml pull
-docker compose -f compose.prebuilt.yaml up -d
-```
-
-Source-build update:
+Update and rebuild from source:
 
 ```bash
 git pull --ff-only
@@ -311,11 +329,6 @@ every ephemeral container. To update it, change `RUNNER_VERSION`, `RUNNER_SHA256
 [actions/runner releases page](https://github.com/actions/runner/releases), then rebuild. GitHub uses
 a progressive rollout, so verify the expected version in the repository or organization's **Add new
 self-hosted runner** page before updating.
-
-Tag pushes run `.github/workflows/release-images.yml`, producing amd64/arm64 manager, base-runner,
-and Rust-runner images in GHCR with SBOMs, provenance attestations, and keyless Cosign signatures.
-Change the image namespace in `compose.prebuilt.yaml` when publishing from a fork. That workflow
-must run once before the prebuilt path exists in a new registry.
 
 ## Backup and restore
 
@@ -338,7 +351,7 @@ after any suspected disclosure.
 - **No runner appears with min 0:** queue a job whose complete `runs-on` labels match a pool, or
   pre-warm one runner from the dashboard.
 - **Job stays queued:** compare job labels with the effective pool labels and verify the repository
-  is included in the App installation/runner group.
+  appears in the dashboard's GitHub repository list or organization runner group.
 - **GitHub disconnected:** inspect `docker compose logs manager` for permission or installation-token
   errors. Reapprove changed App permissions in GitHub.
 - **Webhook rejected:** ensure `PUBLIC_URL` reaches `/webhooks/github` unchanged and the reverse proxy

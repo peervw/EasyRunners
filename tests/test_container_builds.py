@@ -3,6 +3,8 @@ from __future__ import annotations
 import re
 from pathlib import Path
 
+import yaml
+
 REPOSITORY_ROOT = Path(__file__).resolve().parents[1]
 
 
@@ -34,3 +36,18 @@ def test_apt_cache_mounts_are_locked_and_isolated_by_image() -> None:
     manager_ids = _cache_ids(manager_mounts)
     runner_ids = _cache_ids(runner_mounts)
     assert manager_ids.isdisjoint(runner_ids)
+
+
+def test_one_compose_builds_every_image_from_source() -> None:
+    assert not (REPOSITORY_ROOT / "compose.prebuilt.yaml").exists()
+    compose = yaml.safe_load((REPOSITORY_ROOT / "compose.yaml").read_text())
+    services = compose["services"]
+    for name in ("manager", "runner-image", "rust-runner-image"):
+        assert services[name]["build"]
+        assert services[name]["image"].startswith("${")
+        assert "easy-runners-" in services[name]["image"]
+    manager_volumes = services["manager"]["volumes"]
+    assert "easy-runners-data:/data" in manager_volumes
+    assert all(not volume.startswith("./") for volume in manager_volumes)
+    assert "COPY config.yaml ./config.yaml" in (REPOSITORY_ROOT / "Dockerfile").read_text()
+    assert not (REPOSITORY_ROOT / ".github/workflows/release-images.yml").exists()
