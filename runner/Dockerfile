@@ -11,7 +11,7 @@ ENV DEBIAN_FRONTEND=noninteractive
 RUN --mount=type=cache,id=easyrunners-runner-apt-cache,target=/var/cache/apt,sharing=locked \
     --mount=type=cache,id=easyrunners-runner-apt-lists,target=/var/lib/apt,sharing=locked \
     apt-get update && apt-get install -y --no-install-recommends \
-      bash build-essential ca-certificates curl docker.io git jq \
+      bash build-essential ca-certificates curl docker.io docker-compose-v2 git jq \
       clang cmake libicu74 libssl-dev libssl3 lld pkg-config protobuf-compiler \
       python3 python3-pip python3-venv sudo tar unzip zip \
     && rm -rf /var/lib/apt/lists/*
