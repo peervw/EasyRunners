@@ -7,7 +7,7 @@ from typing import Any
 
 import pytest
 
-from runner_manager.docker import DockerRunnerManager
+from runner_manager.docker import DockerRunnerManager, parse_byte_size
 from runner_manager.models import DockerMode, ManagedRunner, RunnerPoolConfig
 
 
@@ -60,6 +60,15 @@ class FakeClient:
 
     def close(self) -> None:
         return None
+
+    def info(self) -> dict[str, Any]:
+        return {
+            "NCPU": 8,
+            "MemTotal": 16 * 1024**3,
+            "DockerRootDir": "/var/lib/docker",
+            "Architecture": "x86_64",
+            "OperatingSystem": "Linux",
+        }
 
 
 @pytest.mark.asyncio
@@ -175,3 +184,14 @@ async def test_diagnostic_capture_and_cleanup_can_be_disabled(settings) -> None:
     settings.runner_log_cleanup_enabled = True
     await manager.prune_logs()
     assert not old.exists()
+
+
+@pytest.mark.asyncio
+async def test_host_resources_report_docker_host_and_disk(settings) -> None:
+    manager = DockerRunnerManager(settings, FakeClient())
+    resources = await manager.host_resources()
+    assert resources["cpus_total"] == 8
+    assert resources["memory_total_bytes"] == 16 * 1024**3
+    assert resources["disk_total_bytes"] > resources["disk_free_bytes"] > 0
+    assert parse_byte_size("8g") == 8 * 1024**3
+    assert parse_byte_size("512MiB") == 512 * 1024**2

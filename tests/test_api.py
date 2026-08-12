@@ -6,6 +6,7 @@ from typing import Any
 import httpx
 import pytest
 from fastapi.testclient import TestClient
+from pydantic import SecretStr
 
 import runner_manager.main as main_module
 from runner_manager.database import Database
@@ -84,6 +85,8 @@ def test_login_dashboard_csrf_and_api_token(client) -> None:
     assert 'aria-label="Main navigation"' in dashboard.text
     assert "Runner pools" in dashboard.text
     assert "GitHub integration" in dashboard.text
+    assert 'data-activity-tab="diagnostics"' in dashboard.text
+    assert "Diagnostic retention" in dashboard.text
     asset_version = app.state.templates.env.globals["asset_version"]
     assert f'/static/app.js?v={asset_version}' in dashboard.text
     versioned_asset = test_client.get(f"/static/app.js?v={asset_version}")
@@ -317,16 +320,67 @@ def test_usage_and_update_status(client, monkeypatch) -> None:
     async def latest_runner():
         return "9.0.0"
 
-    async def latest_manager():
-        return "9.0.0"
+    async def latest_manager_release():
+        return {
+            "tag": "v9.0.0",
+            "version": "9.0.0",
+            "name": "9.0.0",
+            "published_at": "2026-08-12T00:00:00Z",
+            "url": "https://github.com/peervw/EasyRunners/releases/tag/v9.0.0",
+        }
 
     monkeypatch.setattr(app.state.github, "latest_runner_version", latest_runner)
-    monkeypatch.setattr(app.state.github, "latest_manager_version", latest_manager)
+    monkeypatch.setattr(app.state.github, "latest_manager_release", latest_manager_release)
     assert set(test_client.get("/api/usage").json()) == {"24h", "7d"}
     versions = test_client.get("/api/version").json()
     assert versions["runner_update_available"] is True
     assert versions["manager_update_available"] is True
+    assert versions["latest_manager_release"]["tag"] == "v9.0.0"
     assert versions["source_update_command"].startswith("git pull --ff-only")
+
+
+def test_repository_adoption_and_notification_endpoints(client, monkeypatch) -> None:
+    test_client, app = client
+    _, csrf = login(test_client, app)
+    app.state.github_store.save_manifest_result(
+        GitHubSetupRequest(scope="repo", owner="peer"),
+        {"id": 1, "slug": "easy", "pem": "PRIVATE", "webhook_secret": "secret"},
+    )
+    app.state.github_store.save_installation(2)
+
+    async def adoption(pools, *, refresh=False):
+        assert "default" in pools
+        assert refresh is True
+        return {
+            "repositories": [
+                {"repository": "peer/repo", "status": "needs_migration"}
+            ],
+            "recommended_pool": "default",
+            "recommended_runs_on": "runs-on: [self-hosted, linux, docker]",
+            "replacements": {},
+        }
+
+    delivered: list[str] = []
+
+    async def send(event, title, message, **kwargs):
+        delivered.append(event)
+        return True
+
+    app.state.settings.notification_webhook_url = SecretStr(
+        "https://hooks.example.test/easy-runners"
+    )
+    monkeypatch.setattr(app.state.github, "repository_adoption", adoption)
+    monkeypatch.setattr(app.state.notifications, "send", send)
+
+    response = test_client.get("/api/repositories/adoption?refresh=true")
+    assert response.status_code == 200
+    assert response.json()["repositories"][0]["status"] == "needs_migration"
+    assert test_client.get("/api/notifications").json()["configured"] is True
+    tested = test_client.post(
+        "/api/notifications/test", headers={"X-CSRF-Token": csrf}
+    )
+    assert tested.json() == {"delivered": True}
+    assert delivered == ["test"]
 
 
 def test_saved_diagnostic_settings_load_on_restart(settings, monkeypatch) -> None:

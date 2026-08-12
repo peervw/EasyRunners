@@ -11,6 +11,7 @@ let refreshing = false;
 let dashboardCache = {};
 let lastRefreshFailure = '';
 let usagePeriod = '24h';
+let adoptionData = {repositories: [], replacements: {}};
 
 function toast(message, kind = 'error') {
   const item = document.createElement('div');
@@ -31,7 +32,85 @@ function formatBytes(bytes) {
   const value = Math.max(0, Number(bytes) || 0);
   if (value < 1024) return `${value} B`;
   if (value < 1024 ** 2) return `${(value / 1024).toFixed(1)} KiB`;
-  return `${(value / 1024 ** 2).toFixed(1)} MiB`;
+  if (value < 1024 ** 3) return `${(value / 1024 ** 2).toFixed(1)} MiB`;
+  if (value < 1024 ** 4) return `${(value / 1024 ** 3).toFixed(1)} GiB`;
+  return `${(value / 1024 ** 4).toFixed(1)} TiB`;
+}
+
+function resourceItem(label, value, detail, percent) {
+  const bounded = Math.max(0, Math.min(100, Number(percent) || 0));
+  return `<div class="resource-item"><div><span>${esc(label)}</span><strong>${esc(value)}</strong></div><small>${esc(detail)}</small><progress value="${bounded}" max="100">${bounded}%</progress></div>`;
+}
+
+function renderHost(host) {
+  const badge = document.querySelector('#host-badge');
+  const target = document.querySelector('#host-resources');
+  if (!host?.available) {
+    badge.textContent = 'Unavailable';
+    badge.className = 'badge offline';
+    target.innerHTML = `<p class="empty-message">${esc(host?.error || 'Host resource information is unavailable.')}</p>`;
+    return;
+  }
+  const cpuUsed = Math.max(0, host.cpus_total - host.cpus_available);
+  const memoryUsed = Math.max(0, host.memory_total_bytes - host.memory_available_bytes);
+  const diskUsedPercent = host.disk_free_percent == null ? 0 : 100 - host.disk_free_percent;
+  const pressure = host.pressure || [];
+  badge.textContent = pressure.length ? `Pressure: ${pressure.join(', ')}` : 'Healthy';
+  badge.className = `badge ${pressure.length ? 'warning' : 'online'}`;
+  target.innerHTML = [
+    resourceItem('CPU', `${host.cpus_available} of ${host.cpus_total} cores free`, `${host.cpus_reserved} cores reserved`, host.cpus_total ? cpuUsed * 100 / host.cpus_total : 0),
+    resourceItem('Memory', `${formatBytes(host.memory_available_bytes)} free`, `${formatBytes(memoryUsed)} of ${formatBytes(host.memory_total_bytes)} reserved`, host.memory_total_bytes ? memoryUsed * 100 / host.memory_total_bytes : 0),
+    resourceItem('Disk', `${formatBytes(host.disk_free_bytes)} free`, `${host.disk_free_percent ?? '—'}% available`, diskUsedPercent),
+    resourceItem('Runner capacity', `${host.available_runner_capacity} more`, `${host.active_runners} active across all pools`, host.active_runners + host.available_runner_capacity ? host.active_runners * 100 / (host.active_runners + host.available_runner_capacity) : 0),
+  ].join('');
+}
+
+function renderAdoption(adoption) {
+  adoptionData = adoption || {repositories: [], replacements: {}};
+  const repositories = adoptionData.repositories || [];
+  const needsMigration = repositories.filter(repository => ['needs_migration', 'mixed'].includes(repository.status));
+  const badge = document.querySelector('#adoption-badge');
+  badge.textContent = needsMigration.length ? `${needsMigration.length} to update` : (repositories.length ? 'All clear' : 'No data');
+  badge.className = `badge ${needsMigration.length ? 'warning' : (repositories.length ? 'online' : '')}`;
+  document.querySelector('#adoption-runs-on').textContent = adoptionData.recommended_runs_on || 'Connect GitHub to scan repositories';
+  document.querySelector('#copy-adoption-runs-on').disabled = !adoptionData.recommended_runs_on;
+  const target = document.querySelector('#repository-adoption');
+  if (!repositories.length) {
+    target.innerHTML = '<p class="empty-message">No recent workflow jobs were found in the selected repositories.</p>';
+    return;
+  }
+  const labels = {
+    needs_migration: ['Uses hosted runner', 'warning'],
+    mixed: ['Mixed', 'warning'],
+    using_easy_runners: ['Using EasyRunners', 'online'],
+    no_recent_jobs: ['No recent jobs', ''],
+    error: ['Scan failed', 'error'],
+  };
+  target.innerHTML = [...repositories].sort((left, right) => {
+    const priority = status => ['needs_migration', 'mixed'].includes(status) ? 0 : 1;
+    return priority(left.status) - priority(right.status) || left.repository.localeCompare(right.repository);
+  }).map(repository => {
+    const [label, className] = labels[repository.status] || [repository.status, ''];
+    const example = repository.examples?.[0];
+    const detail = example
+      ? `${example.workflow} · ${example.job} · ${example.labels.join(', ')}`
+      : (repository.error || 'No hosted jobs in the recent sample');
+    return `<article class="adoption-row">
+      <div><strong>${esc(repository.repository)}</strong><small>${esc(detail)}</small></div>
+      <div class="adoption-actions"><span class="badge ${className}">${esc(label)}</span>${['needs_migration', 'mixed'].includes(repository.status) ? `<button class="secondary compact copy-adoption" data-pool="${esc(adoptionData.recommended_pool || '')}" type="button">Copy replacement</button>` : ''}</div>
+    </article>`;
+  }).join('');
+}
+
+function renderNotifications(notifications) {
+  const configured = Boolean(notifications?.configured);
+  const badge = document.querySelector('#notification-badge');
+  badge.textContent = configured ? 'Configured' : 'Optional';
+  badge.className = `badge ${configured ? 'online' : ''}`;
+  document.querySelector('#notification-summary').textContent = configured
+    ? `Alerts are ${notifications.signed ? 'HMAC-signed' : 'not signed'} and repeated events are throttled for ${duration(notifications.cooldown_seconds)}.`
+    : 'No failure webhook is configured. EasyRunners continues to record failures in logs and the dashboard.';
+  document.querySelector('#test-notification').disabled = !configured;
 }
 
 function renderUsage(usage) {
@@ -75,12 +154,12 @@ function renderVersions(versions) {
   badge.textContent = available ? 'Update available' : 'Up to date';
   badge.className = `badge ${available ? 'warning' : 'online'}`;
   document.querySelector('#update-summary').textContent = available
-    ? 'Review the available versions before rebuilding.'
-    : 'No newer release was found.';
+    ? `Release ${versions.latest_manager_release?.tag || versions.latest_manager || versions.latest_runner} is available.`
+    : `Checked ${versions.checked_at ? new Date(versions.checked_at).toLocaleString() : 'just now'}; no newer release was found.`;
   document.querySelector('#update-command').textContent = versions.source_update_command
     || 'git pull --ff-only && docker compose up -d --build';
   document.querySelector('#update-links').innerHTML = [
-    versions.manager_release_url ? `<a href="${esc(versions.manager_release_url)}" target="_blank" rel="noopener">EasyRunners releases</a>` : '',
+    (versions.latest_manager_release?.url || versions.manager_release_url) ? `<a href="${esc(versions.latest_manager_release?.url || versions.manager_release_url)}" target="_blank" rel="noopener">EasyRunners releases</a>` : '',
     versions.runner_release_url ? `<a href="${esc(versions.runner_release_url)}" target="_blank" rel="noopener">Runner releases</a>` : '',
   ].filter(Boolean).join('<span class="muted">·</span>');
 }
@@ -191,6 +270,7 @@ async function refresh() {
       history: '/api/history?limit=50', tokens: '/api/auth/tokens', github: '/api/github',
       readiness: '/api/readiness', versions: '/api/version', diagnostics: '/api/diagnostics',
       usage: '/api/usage', diagnosticSettings: '/api/settings/diagnostics',
+      adoption: '/api/repositories/adoption', notifications: '/api/notifications',
     };
     const entries = Object.entries(requests);
     const results = await Promise.allSettled(entries.map(([, url]) => json(url)));
@@ -215,6 +295,8 @@ async function refresh() {
     const versions = dashboardCache.versions || {manager: 'unknown', runner: 'unknown'};
     const diagnostics = dashboardCache.diagnostics || [];
     const usage = dashboardCache.usage || {};
+    const adoption = dashboardCache.adoption || {repositories: [], replacements: {}};
+    const notifications = dashboardCache.notifications || {configured: false};
     const diagnosticSettings = dashboardCache.diagnosticSettings || {
       capture_enabled: true, cleanup_enabled: true, retention_days: 7,
       file_count: 0, total_size: 0, oldest_at: null,
@@ -264,6 +346,9 @@ async function refresh() {
     renderVersions(versions);
     renderReadiness(readiness);
     renderUsage(usage);
+    renderHost(status.host);
+    renderAdoption(adoption);
+    renderNotifications(notifications);
     renderSetupChecklist(github, readiness, history);
 
     poolConfigs = Object.fromEntries(poolEntries.map(([name, pool]) => [name, pool.config]));
@@ -275,7 +360,7 @@ async function refresh() {
       return `
       <article class="pool-card">
         <div class="pool-heading">
-          <div class="pool-title"><span class="pool-avatar">${esc(name.slice(0, 2))}</span><div><h3>${esc(name)}</h3><small>${pool.config.docker_mode === 'socket' ? 'Docker socket' : 'No Docker access'} · min ${pool.min}, max ${pool.max}</small></div></div>
+          <div class="pool-title"><span class="pool-avatar">${esc(name.slice(0, 2))}</span><div><h3>${esc(name)}</h3><small>${pool.config.docker_mode === 'socket' ? 'Docker socket' : 'No Docker access'} · min ${pool.min}, max ${pool.max}${pool.available_capacity == null ? '' : ` · ${pool.available_capacity} host slots free`}</small></div></div>
           <div class="pool-heading-actions"><span class="badge ${healthClass}" title="${esc(healthDetail)}">${esc(healthLabel)}</span><div class="pool-card-actions"><button class="ghost compact edit-pool" data-pool="${esc(name)}" title="Edit pool">Edit</button><button class="ghost compact delete-pool" data-pool="${esc(name)}" title="Delete pool">Delete</button></div></div>
         </div>
         <div class="pool-stats">
@@ -303,6 +388,7 @@ async function refresh() {
     const selectedQuickstartPool = quickstartPool.value;
     quickstartPool.innerHTML = Object.keys(status.pools).map(name => `<option value="${esc(name)}">${esc(name)}</option>`).join('');
     if (status.pools[selectedQuickstartPool]) quickstartPool.value = selectedQuickstartPool;
+    else if (status.pools[adoption.recommended_pool]) quickstartPool.value = adoption.recommended_pool;
     const testRepository = document.querySelector('#test-repository');
     if (testRepository) {
       const selectedTestRepository = testRepository.value;
@@ -339,6 +425,7 @@ async function refresh() {
     document.querySelector('#tokens').innerHTML = tokens.length
       ? tokens.map(token => `<li><span>${esc(token.name)}<small>${esc(token.scope)} · ${token.expires_at ? `expires ${new Date(token.expires_at).toLocaleDateString()}` : 'no expiry'} · ${esc(token.id)}</small></span><button class="ghost compact revoke-token" data-id="${esc(token.id)}">Revoke</button></li>`).join('')
       : '<li class="muted">No API tokens.</li>';
+    document.querySelector('#diagnostic-count').textContent = diagnostics.length;
     document.querySelector('#diagnostics').innerHTML = diagnostics.length
       ? diagnostics.map(item => `<li><a href="/api/diagnostics/${encodeURIComponent(item.name)}">${esc(item.name)}</a><small class="muted">${Math.ceil(item.size / 1024)} KiB · ${new Date(item.modified_at).toLocaleString()}</small></li>`).join('')
       : '<li class="muted">No saved diagnostics.</li>';
@@ -410,6 +497,15 @@ function bindDynamic() {
     button.onclick = async () => {
       const content = document.querySelector('#runs-on-line').textContent;
       await action(() => navigator.clipboard.writeText(content), 'Replacement runs-on line copied.');
+    };
+  });
+  document.querySelectorAll('.copy-adoption').forEach(button => {
+    button.onclick = async () => {
+      const line = adoptionData.replacements?.[button.dataset.pool]?.runs_on
+        || adoptionData.recommended_runs_on;
+      if (line) {
+        await action(() => navigator.clipboard.writeText(line), 'Replacement runs-on line copied.');
+      }
     };
   });
 }
@@ -523,6 +619,24 @@ document.querySelector('#quickstart-pool')?.addEventListener('change', updateRun
 document.querySelector('#copy-runs-on')?.addEventListener('click', async () => {
   const content = document.querySelector('#runs-on-line').textContent;
   await action(() => navigator.clipboard.writeText(content), 'runs-on line copied.');
+});
+document.querySelector('#copy-adoption-runs-on')?.addEventListener('click', async () => {
+  if (adoptionData.recommended_runs_on) {
+    await action(() => navigator.clipboard.writeText(adoptionData.recommended_runs_on), 'Replacement runs-on line copied.');
+  }
+});
+document.querySelector('#refresh-adoption')?.addEventListener('click', async event => {
+  event.currentTarget.disabled = true;
+  const result = await action(() => json('/api/repositories/adoption?refresh=true'), 'Repository scan completed.');
+  if (result) {
+    dashboardCache.adoption = result;
+    renderAdoption(result);
+    bindDynamic();
+  }
+  event.currentTarget.disabled = false;
+});
+document.querySelector('#test-notification')?.addEventListener('click', async () => {
+  await action(() => json('/api/notifications/test', {method: 'POST', headers}), 'Test notification delivered.');
 });
 document.querySelector('#copy-update-command')?.addEventListener('click', async () => {
   const content = document.querySelector('#update-command').textContent;

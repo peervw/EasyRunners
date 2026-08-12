@@ -48,6 +48,15 @@ class Settings(BaseSettings):
     runner_log_retention_days: int = 7
     cleanup_idle_on_shutdown: bool = False
     webhook_enabled: bool = True
+    adoption_scan_interval: int = 600
+    adoption_runs_per_repo: int = 5
+    adoption_max_repositories: int = 100
+    host_resource_cache_seconds: int = 15
+
+    notification_webhook_url: SecretStr | None = None
+    notification_webhook_secret: SecretStr | None = None
+    notification_stuck_job_seconds: int = 900
+    notification_cooldown_seconds: int = 900
 
     manager_repository: str = "peervw/EasyRunners"
 
@@ -97,6 +106,15 @@ class Settings(BaseSettings):
 
     @model_validator(mode="after")
     def validate_pool_definitions(self) -> Settings:
+        if (
+            self.notification_webhook_url
+            and not self.allow_insecure_public_url
+            and not self.notification_webhook_url.get_secret_value().startswith("https://")
+        ):
+            raise ValueError(
+                "NOTIFICATION_WEBHOOK_URL must use HTTPS "
+                "(or set ALLOW_INSECURE_PUBLIC_URL=true for development)"
+            )
         fingerprints: dict[frozenset[str], str] = {}
         for name, pool in self.runner_pools.items():
             if not re.fullmatch(r"[a-zA-Z0-9_.-]+", name):

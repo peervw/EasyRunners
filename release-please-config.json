@@ -1,0 +1,15 @@
+{
+  "$schema": "https://raw.githubusercontent.com/googleapis/release-please/main/schemas/config.json",
+  "release-type": "simple",
+  "include-component-in-tag": false,
+  "changelog-path": "CHANGELOG.md",
+  "extra-files": [
+    "pyproject.toml",
+    "uv.lock"
+  ],
+  "packages": {
+    ".": {
+      "package-name": "easy-runners"
+    }
+  }
+}
