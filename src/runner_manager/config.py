@@ -9,7 +9,7 @@ import yaml
 from pydantic import Field, SecretStr, field_validator, model_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
-from runner_manager.models import GitHubScope, RunnerPoolConfig
+from runner_manager.models import BUILTIN_LABELS, DockerMode, GitHubScope, RunnerPoolConfig
 
 
 class Settings(BaseSettings):
@@ -50,6 +50,7 @@ class Settings(BaseSettings):
     webhook_enabled: bool = True
     adoption_scan_interval: int = 600
     adoption_runs_per_repo: int = 5
+    # Repositories checked per background pass; later passes prioritize remaining work.
     adoption_max_repositories: int = 100
     host_resource_cache_seconds: int = 15
 
@@ -119,7 +120,7 @@ class Settings(BaseSettings):
         for name, pool in self.runner_pools.items():
             if not re.fullmatch(r"[a-zA-Z0-9_.-]+", name):
                 raise ValueError(f"invalid pool name: {name}")
-            fingerprint = frozenset(pool.effective_labels)
+            fingerprint = frozenset(pool.matching_labels)
             previous = fingerprints.get(fingerprint)
             if previous:
                 raise ValueError(f"pools {previous!r} and {name!r} have identical labels")
@@ -155,7 +156,69 @@ def _apply_yaml(settings: Settings, raw: dict[str, Any]) -> Settings:
 
 
 def _default_pool(settings: Settings) -> RunnerPoolConfig:
-    return RunnerPoolConfig(image=settings.runner_image)
+    return RunnerPoolConfig(
+        labels=["standard"], aliases=["ci", "rust"], image=settings.runner_image
+    )
+
+
+def migrate_legacy_pools(
+    pools: dict[str, RunnerPoolConfig],
+) -> tuple[dict[str, RunnerPoolConfig], list[str]]:
+    """Rename recognizable built-in pools without breaking old workflow labels."""
+    migrated = {name: pool.model_copy(deep=True) for name, pool in pools.items()}
+    changes: list[str] = []
+
+    def is_legacy_no_socket(name: str) -> bool:
+        pool = migrated.get(name)
+        return bool(
+            pool
+            and pool.docker_mode == DockerMode.NONE
+            and pool.effective_labels - BUILTIN_LABELS == {name}
+        )
+
+    source_name = next(
+        (name for name in ("ci", "rust") if is_legacy_no_socket(name)), None
+    )
+    if "standard" not in migrated and source_name:
+        source = migrated.pop(source_name)
+        source_signature = source.model_dump(
+            exclude={"labels", "aliases", "priority"}
+        )
+        aliases = sorted(set(source.aliases) | {"ci", "rust"})
+        labels = sorted(
+            (source.effective_labels - BUILTIN_LABELS - {"ci", "rust"})
+            | BUILTIN_LABELS
+            | {"standard"}
+        )
+        migrated["standard"] = source.model_copy(
+            update={"labels": labels, "aliases": aliases}
+        )
+        changes.append(f"{source_name} -> standard")
+
+        # The previous built-in ci/rust pools differed only in priority. Remove
+        # a redundant copy, but retain anything with custom resources or limits.
+        for name in ("ci", "rust"):
+            if not is_legacy_no_socket(name):
+                continue
+            candidate = migrated[name]
+            signature = candidate.model_dump(
+                exclude={"labels", "aliases", "priority"}
+            )
+            if signature == source_signature:
+                migrated.pop(name)
+                changes.append(f"removed redundant {name}")
+
+    default = migrated.get("default")
+    if (
+        "docker" not in migrated
+        and default
+        and default.docker_mode == DockerMode.SOCKET
+        and default.effective_labels - BUILTIN_LABELS == {"docker"}
+    ):
+        migrated["docker"] = migrated.pop("default")
+        changes.append("default -> docker")
+
+    return migrated, changes
 
 
 def load_settings() -> Settings:
@@ -167,8 +230,15 @@ def load_settings() -> Settings:
             raise ValueError(f"{path} must contain a YAML mapping")
         settings = _apply_yaml(settings, raw)
 
-    pools = dict(settings.runner_pools) or {"default": _default_pool(settings)}
-    default = pools.get("default", _default_pool(settings)).model_copy(deep=True)
+    pools = dict(settings.runner_pools) or {"standard": _default_pool(settings)}
+    override_pool = (
+        "standard"
+        if "standard" in pools
+        else "default"
+        if "default" in pools
+        else next(iter(pools))
+    )
+    default = pools[override_pool].model_copy(deep=True)
     overrides: dict[str, Any] = {}
     if settings.runner_min is not None:
         overrides["min"] = settings.runner_min
@@ -186,6 +256,9 @@ def load_settings() -> Settings:
         overrides["docker_mode"] = settings.runner_docker_mode
     if os.getenv("RUNNER_IMAGE"):
         overrides["image"] = settings.runner_image
-    pools["default"] = RunnerPoolConfig.model_validate({**default.model_dump(), **overrides})
+    pools[override_pool] = RunnerPoolConfig.model_validate(
+        {**default.model_dump(), **overrides}
+    )
+    pools, _ = migrate_legacy_pools(pools)
     result = settings.model_copy(update={"runner_pools": pools})
     return Settings.model_validate(result.model_dump())

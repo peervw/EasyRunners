@@ -12,6 +12,13 @@ let dashboardCache = {};
 let lastRefreshFailure = '';
 let usagePeriod = '24h';
 let adoptionData = {repositories: [], replacements: {}};
+let githubData = {configured: false, installed: false, repositories: []};
+let drawerReturnFocus = null;
+let repositoryBrowserReturnFocus = null;
+let repositoryBrowserFilter = 'attention';
+let repositoryBrowserQuery = '';
+let repositoryBrowserPage = 1;
+const repositoryBrowserPageSize = 25;
 
 function toast(message, kind = 'error') {
   const item = document.createElement('div');
@@ -65,41 +72,267 @@ function renderHost(host) {
   ].join('');
 }
 
-function renderAdoption(adoption) {
+function adoptionMeta(repository = {}) {
+  const count = Number(repository.hosted_jobs) || 0;
+  const states = {
+    needs_migration: ['Hosted runner', 'warning', '!', `${count || 'Recent'} hosted-runner ${count === 1 ? 'job needs' : 'jobs need'} migration`],
+    mixed: ['Mixed', 'warning', '!', `${count || 'Some'} hosted-runner ${count === 1 ? 'job remains' : 'jobs remain'}`],
+    using_easy_runners: ['Migrated', 'online', '✓', 'Recent jobs use EasyRunners'],
+    no_recent_jobs: ['Unverified', '', '○', 'No recent workflow jobs were found'],
+    error: ['Scan failed', 'error', '×', repository.error || 'The repository scan failed'],
+    pending: ['Not scanned', '', '○', 'Run a scan to check recent workflow jobs'],
+  };
+  return states[repository.status] || states.pending;
+}
+
+function repositoryRecords() {
+  const byRepository = Object.fromEntries(
+    (adoptionData.repositories || []).map(repository => [repository.repository, repository]),
+  );
+  return [...(githubData.repositories || [])].map(name =>
+    byRepository[name] || {repository: name, status: 'pending', examples: []});
+}
+
+function repositoryGroup(repository) {
+  if (['needs_migration', 'mixed', 'error'].includes(repository.status)) return 'attention';
+  if (repository.status === 'using_easy_runners') return 'migrated';
+  return 'unverified';
+}
+
+function orderedRepositories(repositories) {
+  const priority = {attention: 0, unverified: 1, migrated: 2};
+  return [...repositories].sort((left, right) =>
+    priority[repositoryGroup(left)] - priority[repositoryGroup(right)]
+    || left.repository.localeCompare(right.repository));
+}
+
+function repositoryRow(repository) {
+  const [label, className, icon, description] = adoptionMeta(repository);
+  return `<button class="repository-status-row" type="button" data-repository="${esc(repository.repository)}" title="${esc(description)}. Click for details.">
+    <span class="repository-status-mark ${esc(className)}" aria-hidden="true">${esc(icon)}</span>
+    <span class="repository-status-copy"><strong>${esc(repository.repository)}</strong><small>${esc(description)}</small></span>
+    <span class="badge ${esc(className)}">${esc(label)}</span>
+    <svg class="repository-chevron" aria-hidden="true" viewBox="0 0 24 24"><path d="m9 18 6-6-6-6"/></svg>
+  </button>`;
+}
+
+function repositoryCounts(records) {
+  return records.reduce((counts, repository) => {
+    counts[repositoryGroup(repository)] += 1;
+    return counts;
+  }, {attention: 0, migrated: 0, unverified: 0});
+}
+
+function repositoryScanSummary() {
+  const total = Number(adoptionData.repository_count_total ?? githubData.repositories?.length) || 0;
+  const scanned = Number(adoptionData.repository_count_scanned) || 0;
+  const scan = adoptionData.scan || {};
+  if (scan.scanning) {
+    const coverage = scanned < total ? `${scanned} of ${total} checked` : `All ${total} checked`;
+    return `${coverage} · scanning ${scan.completed || 0}/${scan.total || 0}`;
+  }
+  if (scan.error) return `${scanned} of ${total} scanned · scan paused`;
+  if (!adoptionData.scanned_at) return 'Waiting for the first scan';
+  return scanned < total ? `${scanned} of ${total} scanned` : `${total} repositories checked`;
+}
+
+function repositorySummaryFilters(counts) {
+  return `<div class="repository-summary" aria-label="Repository migration summary">
+    <button class="repository-summary-filter" type="button" data-repository-filter="attention"><strong>${counts.attention}</strong><span>Need attention</span></button>
+    <button class="repository-summary-filter" type="button" data-repository-filter="migrated"><strong>${counts.migrated}</strong><span>Migrated</span></button>
+    <button class="repository-summary-filter" type="button" data-repository-filter="unverified"><strong>${counts.unverified}</strong><span>Unverified</span></button>
+  </div>`;
+}
+
+function renderRepositoryBrowser() {
+  const browser = document.querySelector('#repository-browser');
+  if (!browser) return;
+  const allRecords = orderedRepositories(repositoryRecords());
+  const counts = repositoryCounts(allRecords);
+  const query = repositoryBrowserQuery.trim().toLowerCase();
+  const filtered = allRecords.filter(repository =>
+    (repositoryBrowserFilter === 'all' || repositoryGroup(repository) === repositoryBrowserFilter)
+    && (!query || repository.repository.toLowerCase().includes(query)));
+  const pageCount = Math.max(1, Math.ceil(filtered.length / repositoryBrowserPageSize));
+  repositoryBrowserPage = Math.min(repositoryBrowserPage, pageCount);
+  const start = (repositoryBrowserPage - 1) * repositoryBrowserPageSize;
+  const page = filtered.slice(start, start + repositoryBrowserPageSize);
+  document.querySelector('#repository-browser-count').textContent = `${allRecords.length} repositories`;
+  const progress = document.querySelector('#repository-browser-progress');
+  progress.textContent = repositoryScanSummary();
+  progress.title = adoptionData.scan?.error || '';
+  document.querySelector('#repository-browser-filter').value = repositoryBrowserFilter;
+  document.querySelector('#repository-browser-list').innerHTML = page.length
+    ? page.map(repositoryRow).join('')
+    : '<p class="empty-message">No repositories match this filter.</p>';
+  document.querySelector('#repository-page-summary').textContent = filtered.length
+    ? `${start + 1}–${Math.min(start + repositoryBrowserPageSize, filtered.length)} of ${filtered.length}`
+    : '0 repositories';
+  document.querySelector('#repository-page-previous').disabled = repositoryBrowserPage <= 1;
+  document.querySelector('#repository-page-next').disabled = repositoryBrowserPage >= pageCount;
+  document.querySelector('#repository-browser-summary').innerHTML = repositorySummaryFilters(counts);
+  const manage = document.querySelector('#repository-browser-manage');
+  manage.hidden = !githubData.configure_url;
+  if (githubData.configure_url) manage.href = githubData.configure_url;
+  browser.querySelectorAll('.refresh-adoption').forEach(button => {
+    button.disabled = Boolean(adoptionData.scan?.scanning);
+    button.textContent = adoptionData.scan?.scanning ? 'Scanning…' : 'Scan now';
+  });
+  bindRepositoryControls(browser);
+}
+
+function renderRepositoryAccess(github, adoption) {
+  githubData = github || githubData;
   adoptionData = adoption || {repositories: [], replacements: {}};
-  const repositories = adoptionData.repositories || [];
-  const needsMigration = repositories.filter(repository => ['needs_migration', 'mixed'].includes(repository.status));
-  const badge = document.querySelector('#adoption-badge');
-  badge.textContent = needsMigration.length ? `${needsMigration.length} to update` : (repositories.length ? 'All clear' : 'No data');
-  badge.className = `badge ${needsMigration.length ? 'warning' : (repositories.length ? 'online' : '')}`;
-  document.querySelector('#adoption-runs-on').textContent = adoptionData.recommended_runs_on || 'Connect GitHub to scan repositories';
-  document.querySelector('#copy-adoption-runs-on').disabled = !adoptionData.recommended_runs_on;
-  const target = document.querySelector('#repository-adoption');
-  if (!repositories.length) {
-    target.innerHTML = '<p class="empty-message">No recent workflow jobs were found in the selected repositories.</p>';
+  const target = document.querySelector('#repository-access');
+  if (!target || !githubData.connection) {
+    if (target) target.innerHTML = '';
     return;
   }
-  const labels = {
-    needs_migration: ['Uses hosted runner', 'warning'],
-    mixed: ['Mixed', 'warning'],
-    using_easy_runners: ['Using EasyRunners', 'online'],
-    no_recent_jobs: ['No recent jobs', ''],
-    error: ['Scan failed', 'error'],
-  };
-  target.innerHTML = [...repositories].sort((left, right) => {
-    const priority = status => ['needs_migration', 'mixed'].includes(status) ? 0 : 1;
-    return priority(left.status) - priority(right.status) || left.repository.localeCompare(right.repository);
-  }).map(repository => {
-    const [label, className] = labels[repository.status] || [repository.status, ''];
-    const example = repository.examples?.[0];
-    const detail = example
-      ? `${example.workflow} · ${example.job} · ${example.labels.join(', ')}`
-      : (repository.error || 'No hosted jobs in the recent sample');
-    return `<article class="adoption-row">
-      <div><strong>${esc(repository.repository)}</strong><small>${esc(detail)}</small></div>
-      <div class="adoption-actions"><span class="badge ${className}">${esc(label)}</span>${['needs_migration', 'mixed'].includes(repository.status) ? `<button class="secondary compact copy-adoption" data-pool="${esc(adoptionData.recommended_pool || '')}" type="button">Copy replacement</button>` : ''}</div>
-    </article>`;
-  }).join('');
+  const selection = githubData.connection.repository_selection;
+  const accessWarning = selection === 'all'
+    ? '<p class="access-warning">This App can access all repositories. Restrict the installation on GitHub if needed.</p>'
+    : '';
+  const repositoryErrors = [githubData.metadata_error, githubData.repositories_error].filter(Boolean);
+  const records = orderedRepositories(repositoryRecords());
+  const counts = repositoryCounts(records);
+  const attention = records.filter(repository => repositoryGroup(repository) === 'attention');
+  const inline = (attention.length ? attention : records).slice(0, attention.length ? 6 : 3);
+  const listTitle = attention.length ? 'Needs attention' : 'Repository status';
+  const repositoryList = records.length
+    ? `<div class="repository-inline-heading"><span>${esc(listTitle)}</span><small>${esc(repositoryScanSummary())}</small></div><div class="repository-status-list">${inline.map(repositoryRow).join('')}</div>`
+    : `<p class="empty-message">${githubData.repository_bound
+      ? esc(repositoryErrors.length ? repositoryErrors.join(' · ') : 'No repositories are available to this installation.')
+      : 'No installation repositories were found.'}</p>`;
+  const configure = githubData.configure_url
+    ? `<a href="${esc(githubData.configure_url)}" target="_blank" rel="noopener">Manage access on GitHub</a>`
+    : '';
+  target.innerHTML = `${accessWarning}<section class="repository-access-section" aria-labelledby="repository-access-heading">
+    <div class="repository-access-header">
+      <div><h3 id="repository-access-heading">Repositories</h3><p>Workflow migration across this installation.</p></div>
+      <button class="secondary compact refresh-adoption" type="button" ${adoptionData.scan?.scanning ? 'disabled' : ''}>${adoptionData.scan?.scanning ? 'Scanning…' : 'Scan now'}</button>
+    </div>
+    ${repositorySummaryFilters(counts)}
+    ${repositoryList}
+    <div class="repository-access-footer"><button id="view-all-repositories" class="ghost compact" type="button">View all ${records.length} repositories</button>${configure}</div>
+  </section>`;
+  renderRepositoryBrowser();
+}
+
+function updateMigrationReplacement() {
+  const pool = document.querySelector('#migration-pool')?.value;
+  const replacement = adoptionData.replacements?.[pool];
+  const line = replacement?.runs_on || adoptionData.recommended_runs_on || 'No runner pool available';
+  document.querySelector('#migration-runs-on').textContent = line;
+  document.querySelector('#copy-migration-runs-on').disabled = !replacement && !adoptionData.recommended_runs_on;
+  document.querySelector('#migration-pool-note').textContent = replacement
+    ? `${replacement.docker_mode === 'socket' ? 'Docker socket access' : 'No Docker socket'} · labels: ${replacement.labels.join(', ')}`
+    : '';
+}
+
+function openMigrationDrawer(repositoryName, trigger = null) {
+  const drawer = document.querySelector('#migration-drawer');
+  const repository = repositoryRecords().find(item => item.repository === repositoryName)
+    || {repository: repositoryName, status: 'pending', examples: []};
+  const [label, className, , description] = adoptionMeta(repository);
+  drawerReturnFocus = trigger || document.activeElement;
+  drawer.dataset.repository = repositoryName;
+  document.querySelector('#migration-title').textContent = repositoryName;
+  const status = document.querySelector('#migration-status');
+  status.textContent = label;
+  status.className = `badge ${className}`;
+  document.querySelector('#migration-summary').textContent = description;
+  document.querySelector('#migration-checked').textContent = repository.scanned_at
+    ? `Last checked ${new Date(repository.scanned_at).toLocaleString()}`
+    : 'Not checked yet';
+  const examples = repository.examples || [];
+  document.querySelector('#migration-examples').innerHTML = examples.length
+    ? `<div class="migration-example-heading"><h3>Detected jobs</h3><span>${examples.length} shown</span></div>${examples.map(example => `<article class="migration-example">
+      <div><strong>${esc(example.workflow)} · ${esc(example.job)}</strong><small>${esc(example.workflow_path || 'Workflow file')} · ${esc((example.labels || []).join(', '))}</small></div>
+      ${example.url ? `<a href="${esc(example.url)}" target="_blank" rel="noopener">Open in GitHub</a>` : ''}
+    </article>`).join('')}`
+    : '<div class="migration-empty"><strong>No hosted-runner jobs detected</strong><p>Only a bounded sample of recent workflow jobs is checked. Run the workflow, then scan again to verify it.</p></div>';
+  const pool = document.querySelector('#migration-pool');
+  pool.innerHTML = Object.entries(adoptionData.replacements || {}).map(([name, replacement]) =>
+    `<option value="${esc(name)}">${esc(name)} · ${esc(replacement.docker_mode === 'socket' ? 'Docker' : 'no Docker')}</option>`,
+  ).join('');
+  if (adoptionData.recommended_pool && adoptionData.replacements?.[adoptionData.recommended_pool]) {
+    pool.value = adoptionData.recommended_pool;
+  }
+  updateMigrationReplacement();
+  drawer.hidden = false;
+  updateModalLock();
+  document.querySelector('#close-migration').focus();
+}
+
+function closeMigrationDrawer() {
+  const drawer = document.querySelector('#migration-drawer');
+  if (drawer.hidden) return;
+  const repository = drawer.dataset.repository;
+  drawer.hidden = true;
+  updateModalLock();
+  const browser = document.querySelector('#repository-browser');
+  const triggerRoot = browser.hidden ? document : browser;
+  const currentTrigger = [...triggerRoot.querySelectorAll('.repository-status-row')]
+    .find(button => button.dataset.repository === repository);
+  const focusTarget = drawerReturnFocus?.isConnected ? drawerReturnFocus : currentTrigger;
+  drawerReturnFocus = null;
+  window.requestAnimationFrame(() => focusTarget?.focus?.());
+}
+
+function updateModalLock() {
+  const browserOpen = !document.querySelector('#repository-browser')?.hidden;
+  const drawerOpen = !document.querySelector('#migration-drawer')?.hidden;
+  document.body.classList.toggle('drawer-open', browserOpen || drawerOpen);
+}
+
+function openRepositoryBrowser(filter = 'attention', trigger = null) {
+  const browser = document.querySelector('#repository-browser');
+  repositoryBrowserReturnFocus = trigger || document.activeElement;
+  repositoryBrowserFilter = filter;
+  repositoryBrowserPage = 1;
+  repositoryBrowserQuery = '';
+  document.querySelector('#repository-browser-search').value = '';
+  renderRepositoryBrowser();
+  browser.hidden = false;
+  updateModalLock();
+  document.querySelector('#repository-browser-search').focus();
+}
+
+function closeRepositoryBrowser() {
+  const browser = document.querySelector('#repository-browser');
+  if (browser.hidden) return;
+  browser.hidden = true;
+  updateModalLock();
+  const focusTarget = repositoryBrowserReturnFocus?.isConnected
+    ? repositoryBrowserReturnFocus
+    : document.querySelector('#view-all-repositories');
+  repositoryBrowserReturnFocus = null;
+  window.requestAnimationFrame(() => focusTarget?.focus?.());
+}
+
+function bindRepositoryControls(root = document) {
+  root.querySelectorAll('.repository-status-row').forEach(button => {
+    button.onclick = () => openMigrationDrawer(button.dataset.repository, button);
+  });
+  root.querySelectorAll('.repository-summary-filter').forEach(button => {
+    button.onclick = () => {
+      const browser = document.querySelector('#repository-browser');
+      if (browser.hidden) {
+        openRepositoryBrowser(button.dataset.repositoryFilter, button);
+      } else {
+        const filter = button.dataset.repositoryFilter;
+        repositoryBrowserFilter = filter;
+        repositoryBrowserPage = 1;
+        renderRepositoryBrowser();
+        window.requestAnimationFrame(() => browser.querySelector(
+          `.repository-summary-filter[data-repository-filter="${filter}"]`,
+        )?.focus());
+      }
+    };
+  });
+  const viewAll = root.querySelector('#view-all-repositories');
+  if (viewAll) viewAll.onclick = () => openRepositoryBrowser('all', viewAll);
 }
 
 function renderNotifications(notifications) {
@@ -322,22 +555,6 @@ async function refresh() {
     document.querySelector('#connection-details').innerHTML = github.connection
       ? `<div class="connection-identity"><span class="provider-mark" aria-hidden="true">GH</span><div><strong>${esc(github.connection.owner)}</strong><small>${esc(mode)} · ${esc(github.connection.app_slug || 'manual app')} · ${github.connection.webhook_enabled ? 'Webhooks enabled' : 'Polling only'} · ${repositoryCount} ${repositoryCount === 1 ? 'repository' : 'repositories'}${github.rate_limit?.remaining == null ? '' : ` · ${github.rate_limit.remaining} API requests left`}</small></div></div>`
       : '<p class="help-text">No GitHub App is connected.</p>';
-    const selection = github.connection?.repository_selection;
-    const accessWarning = selection === 'all'
-      ? '<p class="access-warning">This App can access all repositories. Restrict the installation on GitHub if needed.</p>'
-      : '';
-    const repositoryErrors = [github.metadata_error, github.repositories_error].filter(Boolean);
-    const repositoryList = github.repositories?.length
-      ? `<div class="repository-list">${github.repositories.map(repository => `<span class="label">${esc(repository)}</span>`).join('')}</div>`
-      : (github.repository_bound
-        ? `<p class="access-warning">Repositories could not be loaded. ${repositoryErrors.length ? esc(repositoryErrors.join(' · ')) : 'Check the App installation on GitHub.'}</p>`
-        : '');
-    const configure = github.configure_url
-      ? `<a href="${esc(github.configure_url)}" target="_blank" rel="noopener">Manage repository access on GitHub</a>`
-      : '';
-    document.querySelector('#repository-access').innerHTML = github.connection
-      ? `${accessWarning}${repositoryList}${configure}`
-      : '';
     githubRepositories = github.repositories || [];
     repositoryBound = Boolean(github.repository_bound);
     document.querySelector('#updated').textContent = status.last_reconcile
@@ -347,7 +564,7 @@ async function refresh() {
     renderReadiness(readiness);
     renderUsage(usage);
     renderHost(status.host);
-    renderAdoption(adoption);
+    renderRepositoryAccess(github, adoption);
     renderNotifications(notifications);
     renderSetupChecklist(github, readiness, history);
 
@@ -448,10 +665,10 @@ async function refresh() {
   }
 }
 
-function fillPool(name = 'default', config = null) {
+function fillPool(name = 'standard', config = null) {
   selectAppView('settings');
   const form = document.querySelector('#pool-form');
-  const value = config || {labels: ['self-hosted', 'linux', name], min: 0, max: 5, cpu: 4, memory: '8g', docker_mode: 'socket'};
+  const value = config || {labels: ['self-hosted', 'linux', name], min: 0, max: 5, cpu: 4, memory: '8g', docker_mode: 'none'};
   form.pool_name.value = name;
   form.labels.value = value.labels.join(',');
   form.min.value = value.min;
@@ -460,6 +677,7 @@ function fillPool(name = 'default', config = null) {
   form.memory.value = value.memory;
   form.image.value = value.image || '';
   form.docker_mode.value = value.docker_mode;
+  form.dataset.aliases = JSON.stringify(value.aliases || []);
   form.scrollIntoView({behavior: 'smooth', block: 'center'});
 }
 
@@ -499,12 +717,18 @@ function bindDynamic() {
       await action(() => navigator.clipboard.writeText(content), 'Replacement runs-on line copied.');
     };
   });
-  document.querySelectorAll('.copy-adoption').forEach(button => {
+  bindRepositoryControls(document);
+  document.querySelectorAll('.refresh-adoption').forEach(button => {
     button.onclick = async () => {
-      const line = adoptionData.replacements?.[button.dataset.pool]?.runs_on
-        || adoptionData.recommended_runs_on;
-      if (line) {
-        await action(() => navigator.clipboard.writeText(line), 'Replacement runs-on line copied.');
+      button.disabled = true;
+      const result = await action(() => json('/api/repositories/adoption?refresh=true'));
+      if (result) {
+        dashboardCache.adoption = result;
+        renderRepositoryAccess(githubData, result);
+        bindDynamic();
+        toast(result.scan?.scanning ? 'Repository scan started.' : 'Repository scan refreshed.', 'success');
+      } else {
+        button.disabled = false;
       }
     };
   });
@@ -594,14 +818,19 @@ document.querySelector('#pool-form')?.addEventListener('submit', async event => 
     min: Number(form.min.value), max: Number(form.max.value), cpu: Number(form.cpu.value),
     memory: form.memory.value, image: form.image.value || null,
     docker_mode: form.docker_mode.value,
+    aliases: JSON.parse(form.dataset.aliases || '[]'),
   };
   const result = await action(() => json(`/api/pools/${encodeURIComponent(name)}`, {method: 'PUT', headers, body: JSON.stringify(body)}), 'Pool saved.');
   if (result) refresh();
 });
 document.querySelector('#new-pool')?.addEventListener('click', () => fillPool('new-pool'));
-document.querySelector('#rust-pool')?.addEventListener('click', () => fillPool('rust', {
-  labels: ['self-hosted', 'linux', 'rust'], min: 0, max: 5,
-  cpu: 4, memory: '8g', image: null, docker_mode: 'none',
+document.querySelector('#standard-pool')?.addEventListener('click', () => fillPool('standard', {
+  labels: ['self-hosted', 'linux', 'standard'], min: 0, max: 5,
+  cpu: 4, memory: '8g', image: null, docker_mode: 'none', aliases: ['ci', 'rust'],
+}));
+document.querySelector('#docker-pool')?.addEventListener('click', () => fillPool('docker', {
+  labels: ['self-hosted', 'linux', 'docker'], min: 0, max: 5,
+  cpu: 4, memory: '8g', image: null, docker_mode: 'socket',
 }));
 document.querySelector('#export-pools')?.addEventListener('click', async () => {
   await action(async () => {
@@ -620,20 +849,61 @@ document.querySelector('#copy-runs-on')?.addEventListener('click', async () => {
   const content = document.querySelector('#runs-on-line').textContent;
   await action(() => navigator.clipboard.writeText(content), 'runs-on line copied.');
 });
-document.querySelector('#copy-adoption-runs-on')?.addEventListener('click', async () => {
-  if (adoptionData.recommended_runs_on) {
-    await action(() => navigator.clipboard.writeText(adoptionData.recommended_runs_on), 'Replacement runs-on line copied.');
+document.querySelector('#migration-pool')?.addEventListener('change', updateMigrationReplacement);
+document.querySelector('#copy-migration-runs-on')?.addEventListener('click', async () => {
+  const line = document.querySelector('#migration-runs-on').textContent;
+  if (line !== 'No runner pool available') {
+    await action(() => navigator.clipboard.writeText(line), 'Replacement runs-on line copied.');
   }
 });
-document.querySelector('#refresh-adoption')?.addEventListener('click', async event => {
-  event.currentTarget.disabled = true;
-  const result = await action(() => json('/api/repositories/adoption?refresh=true'), 'Repository scan completed.');
-  if (result) {
-    dashboardCache.adoption = result;
-    renderAdoption(result);
-    bindDynamic();
+document.querySelectorAll('[data-close-migration]').forEach(button => {
+  button.addEventListener('click', closeMigrationDrawer);
+});
+document.querySelectorAll('[data-close-repository-browser]').forEach(button => {
+  button.addEventListener('click', closeRepositoryBrowser);
+});
+document.querySelector('#repository-browser-search')?.addEventListener('input', event => {
+  repositoryBrowserQuery = event.target.value;
+  repositoryBrowserPage = 1;
+  renderRepositoryBrowser();
+});
+document.querySelector('#repository-browser-filter')?.addEventListener('change', event => {
+  repositoryBrowserFilter = event.target.value;
+  repositoryBrowserPage = 1;
+  renderRepositoryBrowser();
+});
+document.querySelector('#repository-page-previous')?.addEventListener('click', () => {
+  repositoryBrowserPage = Math.max(1, repositoryBrowserPage - 1);
+  renderRepositoryBrowser();
+});
+document.querySelector('#repository-page-next')?.addEventListener('click', () => {
+  repositoryBrowserPage += 1;
+  renderRepositoryBrowser();
+});
+document.addEventListener('keydown', event => {
+  const drawer = document.querySelector('#migration-drawer');
+  const browser = document.querySelector('#repository-browser');
+  if (drawer.hidden && browser.hidden) return;
+  if (event.key === 'Escape') {
+    if (!drawer.hidden) closeMigrationDrawer();
+    else closeRepositoryBrowser();
+    return;
   }
-  event.currentTarget.disabled = false;
+  if (event.key !== 'Tab') return;
+  const activeModal = !drawer.hidden
+    ? drawer.querySelector('[role="dialog"]')
+    : browser.querySelector('[role="dialog"]');
+  const focusable = [...activeModal.querySelectorAll('button:not(:disabled), a[href], input:not(:disabled), select:not(:disabled)')]
+    .filter(element => element.getClientRects().length);
+  const first = focusable[0];
+  const last = focusable.at(-1);
+  if (event.shiftKey && document.activeElement === first) {
+    event.preventDefault();
+    last?.focus();
+  } else if (!event.shiftKey && document.activeElement === last) {
+    event.preventDefault();
+    first?.focus();
+  }
 });
 document.querySelector('#test-notification')?.addEventListener('click', async () => {
   await action(() => json('/api/notifications/test', {method: 'POST', headers}), 'Test notification delivered.');

@@ -85,6 +85,10 @@ def test_login_dashboard_csrf_and_api_token(client) -> None:
     assert 'aria-label="Main navigation"' in dashboard.text
     assert "Runner pools" in dashboard.text
     assert "GitHub integration" in dashboard.text
+    assert 'id="repository-browser"' in dashboard.text
+    assert 'placeholder="Search repositories…"' in dashboard.text
+    assert 'id="migration-drawer"' in dashboard.text
+    assert 'class="card adoption-card"' not in dashboard.text
     assert 'data-activity-tab="diagnostics"' in dashboard.text
     assert "Diagnostic retention" in dashboard.text
     asset_version = app.state.templates.env.globals["asset_version"]
@@ -348,9 +352,10 @@ def test_repository_adoption_and_notification_endpoints(client, monkeypatch) -> 
     )
     app.state.github_store.save_installation(2)
 
-    async def adoption(pools, *, refresh=False):
+    async def adoption(pools, *, refresh=False, wait=True):
         assert "default" in pools
         assert refresh is True
+        assert wait is False
         return {
             "repositories": [
                 {"repository": "peer/repo", "status": "needs_migration"}
@@ -400,6 +405,27 @@ def test_saved_diagnostic_settings_load_on_restart(settings, monkeypatch) -> Non
         assert app.state.settings.runner_log_retention_days == 30
 
 
+def test_saved_builtin_pools_migrate_on_restart(settings, monkeypatch) -> None:
+    database = Database(settings.data_dir / "easyrunners.sqlite3")
+    legacy = json.dumps(
+        {
+            "default": {"labels": ["docker"], "docker_mode": "socket"},
+            "rust": {"labels": ["rust"], "docker_mode": "none"},
+        }
+    )
+    database.set_setting("runner_pools_override", legacy)
+    database.close()
+    monkeypatch.setattr(main_module, "DockerRunnerManager", NoopDocker)
+    app = create_app(settings, start_scheduler=False)
+    with TestClient(app):
+        assert set(app.state.settings.runner_pools) == {"standard", "docker"}
+        assert app.state.settings.runner_pools["standard"].aliases == ["ci", "rust"]
+        assert (
+            app.state.database.get_setting("runner_pools_override_pre_standard")
+            == legacy
+        )
+
+
 def test_runner_request_carries_repository_and_pool(client, monkeypatch) -> None:
     test_client, app = client
     _, csrf = login(test_client, app)
@@ -410,17 +436,17 @@ def test_runner_request_carries_repository_and_pool(client, monkeypatch) -> None
     app.state.github_store.save_installation(2, repository_selection="selected")
 
     async def test_runner(pool=None, repository=None):
-        assert pool == "rust"
+        assert pool == "standard"
         assert repository == "peer/two"
         return {"pool": pool, "repository": repository}
 
     monkeypatch.setattr(app.state.scheduler, "test_runner", test_runner)
     response = test_client.post(
-        "/api/readiness/test-runner?pool=rust&repository=peer/two",
+        "/api/readiness/test-runner?pool=standard&repository=peer/two",
         headers={"X-CSRF-Token": csrf},
     )
     assert response.status_code == 200
-    assert response.json() == {"pool": "rust", "repository": "peer/two"}
+    assert response.json() == {"pool": "standard", "repository": "peer/two"}
 
 
 def test_webhook_signature_replay_and_demand(client) -> None:

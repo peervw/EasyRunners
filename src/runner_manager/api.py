@@ -327,6 +327,15 @@ async def api_repository_adoption(
     if not _store(request).credentials():
         return {
             "repositories": [],
+            "repository_count_total": 0,
+            "repository_count_scanned": 0,
+            "scan": {
+                "scanning": False,
+                "completed": 0,
+                "total": 0,
+                "started_at": None,
+                "error": None,
+            },
             "scanned_at": None,
             "recommended_pool": None,
             "recommended_runs_on": None,
@@ -335,6 +344,7 @@ async def api_repository_adoption(
     return await _github(request).repository_adoption(
         _scheduler(request).settings.runner_pools,
         refresh=refresh,
+        wait=False,
     )
 
 

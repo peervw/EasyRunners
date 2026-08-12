@@ -8,7 +8,7 @@ permissions:
 
 jobs:
   test:
-    runs-on: [self-hosted, linux, docker]
+    runs-on: [self-hosted, linux, standard]
     steps:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
       - uses: astral-sh/setup-uv@d0d8abe699bfb85fec6de9f7adb5ae17292296ff # v6

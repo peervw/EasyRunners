@@ -129,31 +129,13 @@
                   <label for="quickstart-pool">Runner pool</label>
                   <select id="quickstart-pool" aria-label="Runner pool"></select>
                   <div class="code-copy">
-                    <code id="runs-on-line">runs-on: [self-hosted, linux, docker]</code>
+                    <code id="runs-on-line">runs-on: [self-hosted, linux, standard]</code>
                     <button id="copy-runs-on" class="secondary compact" type="button" aria-label="Copy runs-on line">Copy</button>
                   </div>
                   <p class="help-text">Replace the job's existing <code>runs-on</code> value and push the workflow.</p>
                 </div>
               </aside>
             </div>
-
-            <section class="card adoption-card" aria-labelledby="adoption-heading">
-              <div class="card-header">
-                <div><h2 id="adoption-heading">Workflow migration</h2><p>Recent jobs still using GitHub-hosted runners.</p></div>
-                <div class="actions">
-                  <span id="adoption-badge" class="badge">Scanning</span>
-                  <button id="refresh-adoption" class="secondary compact" type="button">Scan now</button>
-                </div>
-              </div>
-              <div class="adoption-recommendation">
-                <span>Recommended replacement</span>
-                <div class="code-copy">
-                  <code id="adoption-runs-on">Connect GitHub to scan repositories</code>
-                  <button id="copy-adoption-runs-on" class="secondary compact" type="button">Copy</button>
-                </div>
-              </div>
-              <div id="repository-adoption" class="adoption-list"></div>
-            </section>
 
             <section class="card usage-card" aria-labelledby="usage-heading">
               <div class="card-header">
@@ -306,18 +288,21 @@
             <section id="pool-editor" class="card settings-card">
               <div class="settings-row">
                 <div class="settings-copy"><h2>Pool configuration</h2><p>Add or update a runner pool.</p></div>
-                <button id="rust-pool" class="ghost compact" type="button">Rust preset</button>
+                <div class="actions">
+                  <button id="standard-pool" class="ghost compact" type="button">Standard preset</button>
+                  <button id="docker-pool" class="ghost compact" type="button">Docker preset</button>
+                </div>
               </div>
               <div class="settings-body">
-                <form id="pool-form" class="form-grid">
-                  <label>Name<input name="pool_name" value="default" pattern="[A-Za-z0-9_.-]+" required></label>
-                  <label>Labels<input name="labels" value="self-hosted,linux,docker" required></label>
+                <form id="pool-form" class="form-grid" data-aliases='["ci","rust"]'>
+                  <label>Name<input name="pool_name" value="standard" pattern="[A-Za-z0-9_.-]+" required></label>
+                  <label>Labels<input name="labels" value="self-hosted,linux,standard" required></label>
                   <label>Minimum<input name="min" type="number" min="0" value="0" required></label>
                   <label>Maximum<input name="max" type="number" min="0" value="5" required></label>
                   <label>CPU cores<input name="cpu" type="number" min="0.1" step="0.1" value="4" required></label>
                   <label>Memory<input name="memory" value="8g" required></label>
                   <label>Runner image<input name="image" placeholder="Default image"></label>
-                  <label>Docker access<select name="docker_mode"><option value="socket">Docker socket</option><option value="none">No Docker</option></select></label>
+                  <label>Docker access<select name="docker_mode"><option value="none" selected>No Docker</option><option value="socket">Docker socket</option></select></label>
                   <div class="form-submit"><button type="submit">Save pool</button></div>
                 </form>
                 <details class="subtle-details yaml-settings">
@@ -362,6 +347,80 @@
           </section>
         </main>
       </div>
+    </div>
+    <div id="repository-browser" class="repository-browser-shell" hidden>
+      <button class="repository-browser-backdrop" type="button" data-close-repository-browser aria-label="Close repository browser"></button>
+      <section class="repository-browser-dialog" role="dialog" aria-modal="true" aria-labelledby="repository-browser-title">
+        <div class="drawer-header">
+          <div>
+            <span class="drawer-eyebrow">GitHub integration</span>
+            <h2 id="repository-browser-title">Repositories</h2>
+            <p><span id="repository-browser-count">0 repositories</span> · <span id="repository-browser-progress">Waiting for scan</span></p>
+          </div>
+          <div class="actions">
+            <button class="secondary compact refresh-adoption" type="button">Scan now</button>
+            <button id="close-repository-browser" class="ghost drawer-close" type="button" data-close-repository-browser aria-label="Close repository browser">×</button>
+          </div>
+        </div>
+        <div class="repository-browser-content">
+          <div id="repository-browser-summary"></div>
+          <div class="repository-browser-toolbar">
+            <label class="repository-search">Search
+              <input id="repository-browser-search" type="search" placeholder="Search repositories…" autocomplete="off">
+            </label>
+            <label>Status
+              <select id="repository-browser-filter">
+                <option value="attention">Needs attention</option>
+                <option value="migrated">Migrated</option>
+                <option value="unverified">Unverified</option>
+                <option value="all">All repositories</option>
+              </select>
+            </label>
+          </div>
+          <div id="repository-browser-list" class="repository-status-list repository-browser-list"></div>
+        </div>
+        <div class="repository-browser-footer">
+          <a id="repository-browser-manage" href="#" target="_blank" rel="noopener">Manage access on GitHub</a>
+          <div class="repository-pagination">
+            <span id="repository-page-summary">0 repositories</span>
+            <button id="repository-page-previous" class="secondary compact" type="button">Previous</button>
+            <button id="repository-page-next" class="secondary compact" type="button">Next</button>
+          </div>
+        </div>
+      </section>
+    </div>
+    <div id="migration-drawer" class="drawer-shell" hidden>
+      <button class="drawer-backdrop" type="button" data-close-migration aria-label="Close migration details"></button>
+      <aside class="migration-drawer" role="dialog" aria-modal="true" aria-labelledby="migration-title">
+        <div class="drawer-header">
+          <div>
+            <span class="drawer-eyebrow">Workflow migration</span>
+            <h2 id="migration-title">Repository</h2>
+          </div>
+          <button id="close-migration" class="ghost drawer-close" type="button" data-close-migration aria-label="Close migration details">×</button>
+        </div>
+        <div class="drawer-content">
+          <div class="migration-status-line">
+            <span id="migration-status" class="badge">Not scanned</span>
+            <div><p id="migration-summary">Select a repository to see its workflow status.</p><small id="migration-checked"></small></div>
+          </div>
+          <div id="migration-examples" class="migration-examples"></div>
+          <div class="migration-replacement">
+            <div>
+              <h3>Replacement</h3>
+              <p>Choose a pool, then replace the job's current <code>runs-on</code> value.</p>
+            </div>
+            <label for="migration-pool">Runner pool</label>
+            <select id="migration-pool"></select>
+            <div class="code-copy">
+              <code id="migration-runs-on">No runner pool available</code>
+              <button id="copy-migration-runs-on" class="secondary compact" type="button">Copy</button>
+            </div>
+            <p id="migration-pool-note" class="help-text"></p>
+          </div>
+          <p class="drawer-note">EasyRunners does not edit workflow files. Apply the replacement in GitHub, then scan again after the workflow runs.</p>
+        </div>
+      </aside>
     </div>
     <div id="toasts" class="toast-area" aria-live="polite"></div>
   </body>

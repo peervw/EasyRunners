@@ -301,20 +301,39 @@ class GitHubClient:
         self._latest_runner: tuple[float, str | None] = (0.0, None)
         self._latest_manager: tuple[float, dict[str, Any] | None] = (0.0, None)
         self._repositories: tuple[float, list[str]] = (0.0, [])
-        self._adoption: tuple[float, dict[str, Any]] = (0.0, {})
+        self._adoption_results: dict[str, dict[str, Any]] = {}
+        self._adoption_task: asyncio.Task[None] | None = None
+        self._adoption_scan_started_at: datetime | None = None
+        self._adoption_scan_completed_at: datetime | None = None
+        self._adoption_scan_completed_monotonic = 0.0
+        self._adoption_scan_total = 0
+        self._adoption_scan_completed = 0
+        self._adoption_scan_error: str | None = None
         self._installation_metadata_at = 0.0
         self._rate_limited_until = 0.0
         self._rate_limit_remaining: int | None = None
         self._rate_limit_reset_at: datetime | None = None
 
     async def close(self) -> None:
+        if self._adoption_task and not self._adoption_task.done():
+            self._adoption_task.cancel()
+            await asyncio.gather(self._adoption_task, return_exceptions=True)
         if self._owns_client:
             await self.http.aclose()
 
     def invalidate_connection_cache(self) -> None:
         self.auth.invalidate()
         self._repositories = (0.0, [])
-        self._adoption = (0.0, {})
+        if self._adoption_task and not self._adoption_task.done():
+            self._adoption_task.cancel()
+        self._adoption_task = None
+        self._adoption_results = {}
+        self._adoption_scan_started_at = None
+        self._adoption_scan_completed_at = None
+        self._adoption_scan_completed_monotonic = 0.0
+        self._adoption_scan_total = 0
+        self._adoption_scan_completed = 0
+        self._adoption_scan_error = None
         self._installation_metadata_at = 0.0
 
     def _headers(self, token: str) -> dict[str, str]:
@@ -705,6 +724,10 @@ class GitHubClient:
 
     @staticmethod
     def _recommended_pool(pools: dict[str, RunnerPoolConfig]) -> str | None:
+        if "standard" in pools:
+            return "standard"
+        # Older installations used `ci`; continue to recommend it until the
+        # persisted pool configuration is migrated.
         if "ci" in pools:
             return "ci"
         non_docker = sorted(
@@ -742,29 +765,126 @@ class GitHubClient:
         pools: dict[str, RunnerPoolConfig],
         *,
         refresh: bool = False,
+        wait: bool = True,
     ) -> dict[str, Any]:
-        cached_at, cached = self._adoption
-        if (
-            not refresh
-            and cached_at
-            and time.monotonic() - cached_at < self.settings.adoption_scan_interval
-        ):
-            return {**cached, **self._adoption_pool_details(pools)}
+        repositories = await self.list_repositories(refresh=refresh)
+        running = bool(self._adoption_task and not self._adoption_task.done())
+        stale = (
+            not self._adoption_scan_completed_monotonic
+            or time.monotonic() - self._adoption_scan_completed_monotonic
+            >= self.settings.adoption_scan_interval
+        )
+        if (refresh or stale) and not running:
+            scan_targets = self._adoption_scan_targets(repositories)
+            self._adoption_scan_started_at = datetime.now(UTC)
+            self._adoption_scan_total = len(scan_targets)
+            self._adoption_scan_completed = 0
+            self._adoption_scan_error = None
+            self._adoption_task = asyncio.create_task(
+                self._scan_repository_adoption(repositories, scan_targets),
+                name="github-repository-adoption",
+            )
+        if wait and self._adoption_task:
+            await asyncio.shield(self._adoption_task)
+        return self._adoption_snapshot(repositories, pools)
 
-        repositories = (await self.list_repositories(refresh=refresh))[
-            : self.settings.adoption_max_repositories
+    def _adoption_snapshot(
+        self,
+        repositories: list[str],
+        pools: dict[str, RunnerPoolConfig],
+    ) -> dict[str, Any]:
+        results = [
+            self._adoption_results[repository]
+            for repository in repositories
+            if repository in self._adoption_results
         ]
-        semaphore = asyncio.Semaphore(self.settings.poll_concurrency)
+        scanning = bool(self._adoption_task and not self._adoption_task.done())
+        completed = self._adoption_scan_completed
+        total = self._adoption_scan_total
+        return {
+            "repositories": results,
+            "repository_count_total": len(repositories),
+            "repository_count_scanned": len(results),
+            "scan": {
+                "scanning": scanning,
+                "completed": min(completed, total),
+                "total": total,
+                "started_at": (
+                    self._adoption_scan_started_at.isoformat()
+                    if self._adoption_scan_started_at
+                    else None
+                ),
+                "error": self._adoption_scan_error,
+            },
+            "scanned_at": (
+                self._adoption_scan_completed_at.isoformat()
+                if self._adoption_scan_completed_at
+                else None
+            ),
+            "cached_for_seconds": self.settings.adoption_scan_interval,
+            "scan_concurrency": self.settings.poll_concurrency,
+            "scan_batch_size": self.settings.adoption_max_repositories,
+            **self._adoption_pool_details(pools),
+        }
 
-        async def scan(repository: str) -> dict[str, Any]:
-            async with semaphore:
+    def _adoption_scan_targets(self, repositories: list[str]) -> list[str]:
+        priorities = {
+            "error": 1,
+            "no_recent_jobs": 1,
+            "needs_migration": 2,
+            "mixed": 2,
+            "using_easy_runners": 3,
+        }
+
+        def scan_priority(repository: str) -> tuple[int, str, str]:
+            result = self._adoption_results.get(repository, {})
+            status = str(result.get("status") or "")
+            scanned_at = str(result.get("scanned_at") or "")
+            return priorities.get(status, 0), scanned_at, repository.lower()
+
+        limit = max(1, self.settings.adoption_max_repositories)
+        return sorted(repositories, key=scan_priority)[:limit]
+
+    async def _scan_repository_adoption(
+        self,
+        repositories: list[str],
+        scan_targets: list[str],
+    ) -> None:
+        selected = set(repositories)
+        self._adoption_results = {
+            repository: result
+            for repository, result in self._adoption_results.items()
+            if repository in selected
+        }
+        self._adoption_scan_started_at = datetime.now(UTC)
+        self._adoption_scan_total = len(scan_targets)
+        self._adoption_scan_completed = 0
+        self._adoption_scan_error = None
+        stopped = asyncio.Event()
+        queue: asyncio.Queue[str] = asyncio.Queue()
+        for repository in scan_targets:
+            queue.put_nowait(repository)
+
+        async def worker() -> None:
+            while not queue.empty() and not stopped.is_set():
                 try:
-                    return await self._repository_adoption(repository)
+                    repository = queue.get_nowait()
+                except asyncio.QueueEmpty:
+                    return
+                try:
+                    result = await self._repository_adoption(repository)
+                except GitHubRateLimitError as exc:
+                    self._adoption_scan_error = str(exc)
+                    stopped.set()
+                    log.warning("github.adoption_scan_paused", error=str(exc))
+                    return
                 except Exception as exc:
                     log.warning(
-                        "github.adoption_scan_failed", repository=repository, error=str(exc)
+                        "github.adoption_scan_failed",
+                        repository=repository,
+                        error=str(exc),
                     )
-                    return {
+                    result = {
                         "repository": repository,
                         "status": "error",
                         "hosted_jobs": 0,
@@ -772,16 +892,23 @@ class GitHubClient:
                         "examples": [],
                         "error": str(exc),
                     }
+                result["scanned_at"] = datetime.now(UTC).isoformat()
+                self._adoption_results[repository] = result
+                self._adoption_scan_completed += 1
 
-        results = await asyncio.gather(*(scan(repository) for repository in repositories))
-        payload = {
-            "repositories": results,
-            "scanned_at": datetime.now(UTC).isoformat(),
-            "cached_for_seconds": self.settings.adoption_scan_interval,
-            **self._adoption_pool_details(pools),
-        }
-        self._adoption = (time.monotonic(), payload)
-        return dict(payload)
+        worker_count = min(max(1, self.settings.poll_concurrency), queue.qsize())
+        workers = [asyncio.create_task(worker()) for _ in range(worker_count)]
+        try:
+            if workers:
+                await asyncio.gather(*workers)
+        finally:
+            for worker_task in workers:
+                if not worker_task.done():
+                    worker_task.cancel()
+            if workers:
+                await asyncio.gather(*workers, return_exceptions=True)
+        self._adoption_scan_completed_at = datetime.now(UTC)
+        self._adoption_scan_completed_monotonic = time.monotonic()
 
     async def _repository_adoption(self, repository: str) -> dict[str, Any]:
         body = await self.request(
@@ -817,6 +944,7 @@ class GitHubClient:
                         examples.append(
                             {
                                 "workflow": str(run.get("name") or "Workflow"),
+                                "workflow_path": str(run.get("path") or ""),
                                 "job": str(job.get("name") or "Job"),
                                 "labels": labels,
                                 "url": str(job.get("html_url") or run.get("html_url") or ""),

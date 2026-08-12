@@ -46,6 +46,7 @@ BUILTIN_LABELS = {"self-hosted", "linux", NATIVE_ARCHITECTURE}
 
 class RunnerPoolConfig(BaseModel):
     labels: list[str] = Field(default_factory=lambda: sorted(BUILTIN_LABELS))
+    aliases: list[str] = Field(default_factory=list)
     min: int = Field(default=0, ge=0)
     max: int = Field(default=5, ge=0)
     priority: int = 0
@@ -57,7 +58,7 @@ class RunnerPoolConfig(BaseModel):
     job_timeout: int = Field(default=3600, ge=60)
     max_lifetime: int = Field(default=3900, ge=60)
     registration_timeout: int = Field(default=300, ge=30)
-    docker_mode: DockerMode = DockerMode.SOCKET
+    docker_mode: DockerMode = DockerMode.NONE
     runner_group: str | None = None
     environment: dict[str, str] = Field(default_factory=dict)
     environment_from: list[str] = Field(default_factory=list)
@@ -75,6 +76,14 @@ class RunnerPoolConfig(BaseModel):
             )
         return sorted(BUILTIN_LABELS | set(labels))
 
+    @field_validator("aliases")
+    @classmethod
+    def normalize_aliases(cls, value: list[str]) -> list[str]:
+        aliases = list(dict.fromkeys(item.strip().lower() for item in value if item.strip()))
+        if set(aliases) & ARCHITECTURE_LABELS:
+            raise ValueError("pool aliases must not contain architecture labels")
+        return sorted(set(aliases) - BUILTIN_LABELS)
+
     @model_validator(mode="after")
     def validate_limits(self) -> RunnerPoolConfig:
         if self.min > self.max:
@@ -88,8 +97,13 @@ class RunnerPoolConfig(BaseModel):
         return set(self.labels) | BUILTIN_LABELS
 
     @property
+    def matching_labels(self) -> set[str]:
+        """Labels accepted for jobs and registered on compatibility runners."""
+        return self.effective_labels | set(self.aliases)
+
+    @property
     def custom_labels(self) -> list[str]:
-        return sorted(self.effective_labels - BUILTIN_LABELS)
+        return sorted(self.matching_labels - BUILTIN_LABELS)
 
 
 class WorkflowJob(BaseModel):

@@ -189,7 +189,16 @@ class Scheduler:
     async def test_runner(
         self, pool: str | None = None, repository: str | None = None
     ) -> dict[str, Any]:
-        selected = pool or ("default" if "default" in self.settings.runner_pools else None)
+        selected = pool
+        if selected is None:
+            selected = next(
+                (
+                    name
+                    for name in ("standard", "default")
+                    if name in self.settings.runner_pools
+                ),
+                None,
+            )
         if selected is None:
             selected = next(iter(self.settings.runner_pools), None)
         if not selected or selected not in self.settings.runner_pools:
@@ -208,7 +217,7 @@ class Scheduler:
         for name, pool in pools.items():
             if not re.fullmatch(r"[a-zA-Z0-9_.-]+", name):
                 raise ValueError(f"invalid pool name: {name}")
-            fingerprint = frozenset(pool.effective_labels)
+            fingerprint = frozenset(pool.matching_labels)
             if previous := fingerprints.get(fingerprint):
                 raise ValueError(f"pools {previous!r} and {name!r} have identical labels")
             fingerprints[fingerprint] = name
