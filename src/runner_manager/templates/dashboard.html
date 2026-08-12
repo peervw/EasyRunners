@@ -180,6 +180,7 @@
                   <button class="tab active" role="tab" aria-selected="true" aria-controls="runners-panel" data-activity-tab="runners">Runners <span id="runner-count">0</span></button>
                   <button class="tab" role="tab" aria-selected="false" aria-controls="jobs-panel" data-activity-tab="jobs">Jobs <span id="job-count">0</span></button>
                   <button class="tab" role="tab" aria-selected="false" aria-controls="history-panel" data-activity-tab="history">History <span id="history-count">0</span></button>
+                  <button class="tab" role="tab" aria-selected="false" aria-controls="diagnostics-panel" data-activity-tab="diagnostics">Diagnostics <span id="diagnostic-count">0</span></button>
                 </div>
               </div>
               <div id="runners-panel" class="activity-view" role="tabpanel" data-activity-panel="runners">
@@ -190,6 +191,13 @@
               </div>
               <div id="history-panel" class="activity-view" role="tabpanel" data-activity-panel="history" hidden>
                 <div class="table-wrap"><table><thead><tr><th>Job</th><th>Repository</th><th>Pool</th><th>Conclusion</th><th>Completed</th></tr></thead><tbody id="history"></tbody></table></div>
+              </div>
+              <div id="diagnostics-panel" class="activity-view diagnostic-activity" role="tabpanel" data-activity-panel="diagnostics" hidden>
+                <div class="diagnostic-activity-header">
+                  <div><strong>Runner diagnostics</strong><p id="diagnostic-summary">Loading storage usage.</p></div>
+                  <button id="clear-diagnostics" class="ghost compact danger-button" type="button">Delete all</button>
+                </div>
+                <ul id="diagnostics" class="diagnostic-list"></ul>
               </div>
             </section>
           </section>
@@ -332,7 +340,7 @@
                 </div>
               </section>
               <section class="card settings-card">
-                <div class="settings-row"><div class="settings-copy"><h2>Diagnostics</h2><p id="diagnostic-summary">Loading storage usage.</p></div></div>
+                <div class="settings-row"><div class="settings-copy"><h2>Diagnostic retention</h2><p>Choose what to save and how long to keep it.</p></div></div>
                 <div class="settings-body">
                   <form id="diagnostic-settings-form" class="diagnostic-form">
                     <label class="check-label"><input name="capture_enabled" type="checkbox"> Save runner diagnostics</label>
@@ -348,8 +356,6 @@
                     </label>
                     <button class="secondary compact" type="submit">Save</button>
                   </form>
-                  <div class="diagnostic-actions"><strong>Saved files</strong><button id="clear-diagnostics" class="ghost compact danger-button" type="button">Delete all</button></div>
-                  <ul id="diagnostics" class="diagnostic-list"></ul>
                 </div>
               </section>
             </div>
