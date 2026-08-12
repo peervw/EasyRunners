@@ -1,41 +1,15 @@
 # EasyRunners
 
-**Self-hosted GitHub Actions runners without turning runner management into an infrastructure
-project.**
+**The easy way to run GitHub Actions on your own hardware.**
 
-Go from a fresh Docker host to automatically scaled, ephemeral runners in minutes: start one
-Compose stack, connect GitHub in the dashboard, and change one `runs-on` line. EasyRunners takes it
-from there.
+Deploy one Compose stack, connect GitHub, and change one workflow line. EasyRunners starts a clean
+runner when a matching job arrives and removes it when the job is done.
 
-- **One-command deployment:** one source-built Compose file and one persistent data volume.
-- **Click-through GitHub setup:** EasyRunners creates and configures the private GitHub App for you.
-- **Scale to zero:** a matching job starts a runner; the container disappears when the job ends.
-- **Fresh jobs:** every job gets a clean container filesystem and workspace.
-- **Multi-repository:** one installation can serve every trusted repository selected in GitHub.
-- **Migration guidance:** the dashboard finds recent jobs still using `ubuntu-latest` and shows the
-  exact replacement for the recommended pool.
-- **Resource guardrails:** see host CPU, memory, disk, and remaining runner slots before a queue
-  reaches the machine's limit.
-- **Batteries included:** one universal Linux image covers Docker, Python, Rust, and common build
-  tooling; setup actions handle any other language or version.
-- **Small control plane:** no Kubernetes, external database, queue, or registry login required.
+![EasyRunners dashboard showing runner capacity and workflow labels](docs/images/dashboard-overview.jpg)
 
-GitHub still owns workflows, scheduling, logs, secrets, and results. EasyRunners only supplies fresh
-official runner capacity exactly when it is needed.
+## Your first self-hosted job
 
-## Requirements
-
-- x86_64 or ARM64 Ubuntu, or another modern Linux distribution
-- Docker Engine and Docker Compose v2
-- A browser-reachable HTTPS URL (public for webhooks, private/LAN is fine for polling-only mode)
-- One or more trusted GitHub repositories, or a GitHub organization
-
-Downloading and configuring GitHub's runner means accepting the applicable
-[GitHub Customer Agreement](https://github.com/customer-terms).
-
-## Quick start: running in minutes
-
-### 1. Start EasyRunners
+### 1. Deploy
 
 ```bash
 git clone https://github.com/peervw/EasyRunners.git easy-runners
@@ -45,57 +19,83 @@ docker compose up -d --build
 docker compose logs manager
 ```
 
-That is the entire deployment. Compose builds the manager and one universal runner image from the
-checked-out commit. No container registry login, image publishing, or extra service is required.
+Compose builds the manager and universal runner image locally. The first boot prints a one-time
+administrator password in the manager logs.
 
-In Dokploy, choose `compose.yaml`, set `PUBLIC_URL` in the environment, and deploy. The Compose file
-already declares the persistent data volume and Docker socket; do not add another volume in the
-advanced settings. Route the public HTTPS domain to the `manager` service on port 8080.
+Using Dokploy? Select `compose.yaml`, set `PUBLIC_URL`, route your HTTPS domain to the `manager`
+service on port 8080, and deploy. The Compose file already includes its volume and Docker socket.
 
-### 2. Connect GitHub in the dashboard
+### 2. Connect GitHub
 
-The first boot prints an `auth.bootstrap_password` JSON event exactly once. Open `PUBLIC_URL`, sign
-in with that password, and replace it with a password of at least 14 characters. Paste the account
-URL, such as `https://github.com/peervw`, under **Settings → GitHub integration**, then select
-**Connect GitHub**:
+Open `PUBLIC_URL`, sign in with the one-time password, and choose **Connect GitHub**. Enter your
+account URL, such as `https://github.com/peervw`, and follow GitHub's installation screen. Select
+**Only select repositories** unless every repository in the account is trusted.
 
-1. EasyRunners detects the account and whether it is a user or organization.
-2. GitHub creates the preconfigured private App and asks where to install it.
-3. Choose **Only select repositories** and select every trusted repository that should use these
-   runners.
-4. Return to the dashboard; all selected repositories appear under **GitHub connection**.
+EasyRunners creates the private GitHub App with the required permissions and discovers the selected
+repositories automatically. No registration token, App private key, or webhook secret needs to be
+copied by hand.
 
-For personal accounts, EasyRunners creates repository-specific runners: a job from repository A
-cannot run on a runner registered to repository B. One App installation can still serve every
-repository selected on GitHub. For organizations, the optional shared-runner mode registers at the
-organization level and should be restricted with GitHub runner groups.
+### 3. Change one line
 
-### 3. Change one workflow line and push
-
-In each existing workflow job, replace its hosted runner line:
+Replace the job's current `runs-on` value:
 
 ```yaml
 # before
 runs-on: ubuntu-latest
 
-# Tests, linting, Rust, and builds that do not invoke Docker (recommended)
+# Tests, linting, Rust, and other jobs that do not invoke Docker
 runs-on: [self-hosted, linux, standard]
 
-# Docker jobs
+# Jobs that build or run Docker containers
 runs-on: [self-hosted, linux, docker]
 ```
 
-Push the change. The dashboard shows the job as queued, creates a fresh runner for that repository,
-shows it as busy, and removes its container and workspace when the job finishes. The dashboard's
-**Workflow labels** card shows the exact line for every configured pool and diagnoses jobs whose
-labels do not match a pool. Under **Settings → GitHub integration**, every selected repository has a
-migration status. A green check means its recent jobs use EasyRunners; click any repository to see
-hosted-runner jobs and copy the exact replacement for a pool. Large installations stay compact with
-status filters, search, and paginated results. The scan runs in the background with bounded GitHub
-concurrency, retains the latest result for each repository, and caches a bounded job sample for ten
-minutes; it does not read or modify workflow files.
+Push the workflow. Watch it move through **queued → starting → busy → complete** while EasyRunners
+creates one ephemeral runner and cleans up its container and workspace afterward. Future matching
+jobs work the same way.
 
-That's it—future matching jobs scale up and clean themselves up automatically.
+## Everything in one place
+
+The dashboard shows live runners, queue state, pool capacity, and host CPU, memory, and disk. It also
+gives you the exact `runs-on` value for every pool, so there is no label guessing.
+
+![EasyRunners GitHub settings showing repository migration status](docs/images/github-settings.jpg)
+
+_Screenshots show the current interface with example runner activity._
+
+The GitHub settings page keeps larger installations manageable: search and filter repositories,
+see which ones have migrated, inspect jobs still using GitHub-hosted runners, and copy the correct
+replacement labels. Scans are read-only; EasyRunners does not edit workflow files.
+
+Behind that simple setup:
+
+- Jobs get a fresh container filesystem and workspace.
+- Runners scale to zero and disappear after one job.
+- One GitHub App installation can serve many selected repositories.
+- The universal runner image includes Docker tooling, Python, Rust, and common build tools.
+- The standard pool has no Docker socket; the Docker pool is available when a job needs it.
+- No Kubernetes, external database, queue, or registry login is required.
+
+GitHub still owns workflows, scheduling, logs, secrets, and results. EasyRunners supplies official
+self-hosted runner capacity when it is needed.
+
+## Requirements
+
+- x86_64 or ARM64 Linux
+- Docker Engine and Docker Compose v2
+- An HTTPS URL reachable by your browser (public for instant webhook scaling; private/LAN works with
+  polling)
+- One or more trusted GitHub repositories, or a GitHub organization
+
+Downloading and configuring GitHub's runner means accepting the applicable
+[GitHub Customer Agreement](https://github.com/customer-terms).
+
+## Setup notes
+
+For personal accounts, EasyRunners creates repository-specific runners: a job from repository A
+cannot run on a runner registered to repository B. One App installation can still serve every
+repository selected on GitHub. For organizations, the optional shared-runner mode registers at the
+organization level and should be restricted with GitHub runner groups.
 
 If login expires or the browser is closed during setup, sign in again and use **Continue GitHub
 installation**. **Start over** clears the local connection; remove an abandoned App separately in
