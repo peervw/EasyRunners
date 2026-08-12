@@ -339,6 +339,7 @@ async function refresh() {
     document.querySelector('#tokens').innerHTML = tokens.length
       ? tokens.map(token => `<li><span>${esc(token.name)}<small>${esc(token.scope)} · ${token.expires_at ? `expires ${new Date(token.expires_at).toLocaleDateString()}` : 'no expiry'} · ${esc(token.id)}</small></span><button class="ghost compact revoke-token" data-id="${esc(token.id)}">Revoke</button></li>`).join('')
       : '<li class="muted">No API tokens.</li>';
+    document.querySelector('#diagnostic-count').textContent = diagnostics.length;
     document.querySelector('#diagnostics').innerHTML = diagnostics.length
       ? diagnostics.map(item => `<li><a href="/api/diagnostics/${encodeURIComponent(item.name)}">${esc(item.name)}</a><small class="muted">${Math.ceil(item.size / 1024)} KiB · ${new Date(item.modified_at).toLocaleString()}</small></li>`).join('')
       : '<li class="muted">No saved diagnostics.</li>';

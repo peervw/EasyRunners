@@ -132,6 +132,12 @@
 .tab span { min-width: 17px; height: 17px; display: inline-grid; place-items: center; border-radius: 999px; background: var(--secondary); font-size: 9px; }
 .activity-view { min-height: 180px; }
 .activity-view td:first-child { color: var(--foreground); font-weight: 550; }
+.diagnostic-activity { padding: 0 18px 18px; }
+.diagnostic-activity-header { min-height: 62px; display: flex; align-items: center; justify-content: space-between; gap: 16px; border-bottom: 1px solid var(--border); }
+.diagnostic-activity-header strong { font-size: 12px; font-weight: 550; }
+.diagnostic-activity-header p { margin: 2px 0 0; color: var(--muted); font-size: 11px; }
+.diagnostic-activity .diagnostic-list { margin-top: 0; }
+.diagnostic-activity .diagnostic-list li:first-child { border-top: 0; }
 .empty-cell { height: 150px; color: var(--muted); text-align: center; }
 .job-reason { display: block; max-width: 360px; margin-top: 3px; color: var(--muted); font-size: 10px; font-weight: 400; white-space: normal; }
 .unmatched { color: var(--warning); white-space: normal; }
@@ -188,7 +194,6 @@
 .diagnostic-form > label:not(.check-label) { display: grid; grid-template-columns: 1fr 120px; align-items: center; gap: 10px; }
 .diagnostic-form select { margin: 0; }
 .diagnostic-form > button { justify-self: start; }
-.diagnostic-actions { display: flex; align-items: center; justify-content: space-between; gap: 10px; margin-top: 17px; border-top: 1px solid var(--border); padding-top: 12px; font-size: 12px; }
 .danger-button { color: var(--danger) !important; }
 
 .toast-area { position: fixed; right: 18px; bottom: 18px; z-index: 50; width: min(380px, calc(100vw - 36px)); display: grid; gap: 8px; }

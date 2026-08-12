@@ -84,6 +84,8 @@ def test_login_dashboard_csrf_and_api_token(client) -> None:
     assert 'aria-label="Main navigation"' in dashboard.text
     assert "Runner pools" in dashboard.text
     assert "GitHub integration" in dashboard.text
+    assert 'data-activity-tab="diagnostics"' in dashboard.text
+    assert "Diagnostic retention" in dashboard.text
     asset_version = app.state.templates.env.globals["asset_version"]
     assert f'/static/app.js?v={asset_version}' in dashboard.text
     versioned_asset = test_client.get(f"/static/app.js?v={asset_version}")
