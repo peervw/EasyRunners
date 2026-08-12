@@ -137,24 +137,6 @@
               </aside>
             </div>
 
-            <section class="card adoption-card" aria-labelledby="adoption-heading">
-              <div class="card-header">
-                <div><h2 id="adoption-heading">Workflow migration</h2><p>Recent jobs still using GitHub-hosted runners.</p></div>
-                <div class="actions">
-                  <span id="adoption-badge" class="badge">Scanning</span>
-                  <button id="refresh-adoption" class="secondary compact" type="button">Scan now</button>
-                </div>
-              </div>
-              <div class="adoption-recommendation">
-                <span>Recommended replacement</span>
-                <div class="code-copy">
-                  <code id="adoption-runs-on">Connect GitHub to scan repositories</code>
-                  <button id="copy-adoption-runs-on" class="secondary compact" type="button">Copy</button>
-                </div>
-              </div>
-              <div id="repository-adoption" class="adoption-list"></div>
-            </section>
-
             <section class="card usage-card" aria-labelledby="usage-heading">
               <div class="card-header">
                 <div><h2 id="usage-heading">Usage</h2><p>Completed jobs recorded by this manager.</p></div>
@@ -362,6 +344,39 @@
           </section>
         </main>
       </div>
+    </div>
+    <div id="migration-drawer" class="drawer-shell" hidden>
+      <button class="drawer-backdrop" type="button" data-close-migration aria-label="Close migration details"></button>
+      <aside class="migration-drawer" role="dialog" aria-modal="true" aria-labelledby="migration-title">
+        <div class="drawer-header">
+          <div>
+            <span class="drawer-eyebrow">Workflow migration</span>
+            <h2 id="migration-title">Repository</h2>
+          </div>
+          <button id="close-migration" class="ghost drawer-close" type="button" data-close-migration aria-label="Close migration details">×</button>
+        </div>
+        <div class="drawer-content">
+          <div class="migration-status-line">
+            <span id="migration-status" class="badge">Not scanned</span>
+            <p id="migration-summary">Select a repository to see its workflow status.</p>
+          </div>
+          <div id="migration-examples" class="migration-examples"></div>
+          <div class="migration-replacement">
+            <div>
+              <h3>Replacement</h3>
+              <p>Choose a pool, then replace the job's current <code>runs-on</code> value.</p>
+            </div>
+            <label for="migration-pool">Runner pool</label>
+            <select id="migration-pool"></select>
+            <div class="code-copy">
+              <code id="migration-runs-on">No runner pool available</code>
+              <button id="copy-migration-runs-on" class="secondary compact" type="button">Copy</button>
+            </div>
+            <p id="migration-pool-note" class="help-text"></p>
+          </div>
+          <p class="drawer-note">EasyRunners does not edit workflow files. Apply the replacement in GitHub, then scan again after the workflow runs.</p>
+        </div>
+      </aside>
     </div>
     <div id="toasts" class="toast-area" aria-live="polite"></div>
   </body>

@@ -85,6 +85,8 @@ def test_login_dashboard_csrf_and_api_token(client) -> None:
     assert 'aria-label="Main navigation"' in dashboard.text
     assert "Runner pools" in dashboard.text
     assert "GitHub integration" in dashboard.text
+    assert 'id="migration-drawer"' in dashboard.text
+    assert 'class="card adoption-card"' not in dashboard.text
     assert 'data-activity-tab="diagnostics"' in dashboard.text
     assert "Diagnostic retention" in dashboard.text
     asset_version = app.state.templates.env.globals["asset_version"]

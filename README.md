@@ -91,10 +91,10 @@ runs-on: [self-hosted, linux, rust]
 Push the change. The dashboard shows the job as queued, creates a fresh runner for that repository,
 shows it as busy, and removes its container and workspace when the job finishes. The dashboard's
 **Workflow labels** card shows the exact line for every configured pool and diagnoses jobs whose
-labels do not match a pool. **Workflow migration** scans a bounded sample of recent Actions jobs in
-each selected repository, highlights repositories still using a GitHub-hosted Ubuntu label, and
-copies the recommended replacement. It uses the existing Actions read permission and caches scans
-for ten minutes; it does not read or modify workflow files.
+labels do not match a pool. Under **Settings → GitHub integration**, every selected repository has a
+migration status. A green check means its recent jobs use EasyRunners; click any repository to see
+hosted-runner jobs and copy the exact replacement for a pool. The scan uses the existing Actions read
+permission and caches a bounded sample for ten minutes; it does not read or modify workflow files.
 
 That's it—future matching jobs scale up and clean themselves up automatically.
 

@@ -817,6 +817,7 @@ class GitHubClient:
                         examples.append(
                             {
                                 "workflow": str(run.get("name") or "Workflow"),
+                                "workflow_path": str(run.get("path") or ""),
                                 "job": str(job.get("name") or "Job"),
                                 "labels": labels,
                                 "url": str(job.get("html_url") or run.get("html_url") or ""),

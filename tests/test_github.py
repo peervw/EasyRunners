@@ -474,7 +474,15 @@ async def test_repository_adoption_finds_hosted_jobs_and_exact_replacement(
         if path.endswith("/actions/runs"):
             return httpx.Response(
                 200,
-                json={"workflow_runs": [{"id": 42, "name": "CI"}]},
+                json={
+                    "workflow_runs": [
+                        {
+                            "id": 42,
+                            "name": "CI",
+                            "path": ".github/workflows/ci.yml",
+                        }
+                    ]
+                },
             )
         if path.endswith("/actions/runs/42/jobs"):
             label = "ubuntu-latest" if "/hosted/" in path else "self-hosted"
@@ -507,6 +515,10 @@ async def test_repository_adoption_finds_hosted_jobs_and_exact_replacement(
     adoption = await client.repository_adoption(pools)
     by_repository = {item["repository"]: item for item in adoption["repositories"]}
     assert by_repository["peer/hosted"]["status"] == "needs_migration"
+    assert (
+        by_repository["peer/hosted"]["examples"][0]["workflow_path"]
+        == ".github/workflows/ci.yml"
+    )
     assert by_repository["peer/self-hosted"]["status"] == "using_easy_runners"
     assert adoption["recommended_pool"] == "ci"
     assert adoption["recommended_runs_on"] == "runs-on: [self-hosted, linux, ci]"
