@@ -58,11 +58,12 @@ def test_one_compose_builds_every_image_from_source() -> None:
     assert all(not volume.startswith("./") for volume in manager_volumes)
     assert "COPY config.yaml ./config.yaml" in (REPOSITORY_ROOT / "Dockerfile").read_text()
     assert not (REPOSITORY_ROOT / ".github/workflows/release-images.yml").exists()
+    assert "NOTIFICATION_WEBHOOK_URL" in services["manager"]["environment"]
 
 
 def test_ci_and_examples_pin_actions_to_immutable_commits() -> None:
     workflow_files = [
-        REPOSITORY_ROOT / ".github/workflows/ci.yml",
+        *sorted((REPOSITORY_ROOT / ".github/workflows").glob("*.yml")),
         *sorted((REPOSITORY_ROOT / "examples").glob("*.yaml")),
     ]
     for path in workflow_files:
@@ -74,3 +75,27 @@ def test_ci_and_examples_pin_actions_to_immutable_commits() -> None:
     assert "uv run ruff check ." in ci
     assert "uv run mypy src" in ci
     assert "linux/amd64,linux/arm64" in ci
+
+
+def test_dependency_and_release_automation_is_configured() -> None:
+    dependabot = yaml.safe_load(
+        (REPOSITORY_ROOT / ".github/dependabot.yml").read_text()
+    )
+    ecosystems = {item["package-ecosystem"] for item in dependabot["updates"]}
+    assert ecosystems == {"uv", "github-actions"}
+
+    release = yaml.safe_load(
+        (REPOSITORY_ROOT / "release-please-config.json").read_text()
+    )
+    assert release["release-type"] == "simple"
+    assert set(release["extra-files"]) == {"pyproject.toml", "uv.lock"}
+    assert "x-release-please-version" in (REPOSITORY_ROOT / "pyproject.toml").read_text()
+    assert "x-release-please-version" in (REPOSITORY_ROOT / "uv.lock").read_text()
+
+
+def test_default_config_offers_a_no_socket_ci_pool() -> None:
+    config = yaml.safe_load((REPOSITORY_ROOT / "config.yaml").read_text())
+    ci = config["runner_pools"]["ci"]
+    assert ci["docker_mode"] == "none"
+    assert "ci" in ci["labels"]
+    assert config["runner_pools"]["default"]["docker_mode"] == "socket"

@@ -14,6 +14,9 @@ concurrency:
 
 jobs:
   python:
+    # Keep this on the existing Docker pool so upgrades cannot deadlock before a
+    # newly added pool has been deployed. New installations should use `ci` for
+    # jobs that do not need Docker.
     runs-on: [self-hosted, linux, docker]
     steps:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4

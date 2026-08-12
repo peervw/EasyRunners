@@ -2,9 +2,12 @@ from __future__ import annotations
 
 import asyncio
 import os
+import re
+import shutil
 import stat
 import uuid
 from datetime import UTC, datetime
+from time import monotonic
 from typing import Any
 
 import docker as docker_sdk
@@ -30,6 +33,8 @@ class DockerRunnerManager:
     def __init__(self, settings: Settings, client: Any | None = None) -> None:
         self.settings = settings
         self.client = client or docker_sdk.DockerClient(base_url=settings.docker_host)
+        self._host_cache_at = 0.0
+        self._host_cache: dict[str, Any] | None = None
 
     async def close(self) -> None:
         await asyncio.to_thread(self.client.close)
@@ -48,6 +53,31 @@ class DockerRunnerManager:
         except Exception:
             return False
         return True
+
+    async def host_resources(self) -> dict[str, Any]:
+        if (
+            self._host_cache is not None
+            and monotonic() - self._host_cache_at < self.settings.host_resource_cache_seconds
+        ):
+            return dict(self._host_cache)
+        resources = await asyncio.to_thread(self._host_resources)
+        self._host_cache = resources
+        self._host_cache_at = monotonic()
+        return dict(resources)
+
+    def _host_resources(self) -> dict[str, Any]:
+        info = self.client.info()
+        self.settings.data_dir.mkdir(parents=True, exist_ok=True)
+        disk = shutil.disk_usage(self.settings.data_dir)
+        return {
+            "cpus_total": int(info.get("NCPU") or 0),
+            "memory_total_bytes": int(info.get("MemTotal") or 0),
+            "disk_total_bytes": int(disk.total),
+            "disk_free_bytes": int(disk.free),
+            "docker_root_dir": info.get("DockerRootDir"),
+            "architecture": info.get("Architecture"),
+            "operating_system": info.get("OperatingSystem"),
+        }
 
     async def list_managed(self) -> list[ManagedRunner]:
         return await asyncio.to_thread(self._list_managed)
@@ -274,3 +304,14 @@ def _parse_volume(value: str) -> tuple[str, str, str]:
     if len(parts) == 3 and parts[2] in {"ro", "rw"}:
         return parts[0], parts[1], parts[2]
     raise ValueError(f"invalid volume specification: {value!r}")
+
+
+def parse_byte_size(value: str) -> int:
+    match = re.fullmatch(r"\s*(\d+(?:\.\d+)?)\s*([kmgt]?i?b?)?\s*", value.lower())
+    if not match:
+        raise ValueError(f"invalid byte size: {value!r}")
+    amount = float(match.group(1))
+    unit = (match.group(2) or "b").rstrip("b")
+    unit = unit.rstrip("i")
+    powers = {"": 0, "k": 1, "m": 2, "g": 3, "t": 4}
+    return int(amount * (1024 ** powers[unit]))

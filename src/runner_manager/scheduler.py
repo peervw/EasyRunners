@@ -13,10 +13,11 @@ import structlog
 
 from runner_manager.config import Settings
 from runner_manager.demand import DemandTracker
-from runner_manager.docker import DockerRunnerManager
+from runner_manager.docker import DockerRunnerManager, parse_byte_size
 from runner_manager.github import GitHubClient
 from runner_manager.metrics import RECONCILE_DURATION, RUNNER_CREATION_FAILURES, RUNNERS
 from runner_manager.models import GitHubScope, ManagedRunner, RunnerPoolConfig
+from runner_manager.notifications import NotificationManager
 
 log = structlog.get_logger()
 
@@ -57,11 +58,13 @@ class Scheduler:
         github: GitHubClient,
         docker: DockerRunnerManager,
         demand: DemandTracker,
+        notifications: NotificationManager | None = None,
     ) -> None:
         self.settings = settings
         self.github = github
         self.docker = docker
         self.demand = demand
+        self.notifications = notifications
         self._lock = asyncio.Lock()
         self._stop = asyncio.Event()
         self._manual: dict[tuple[str, str | None], ManualFloor] = {}
@@ -135,6 +138,7 @@ class Scheduler:
             self._github_connected = False
             self._last_error = str(exc)
             log.error("scheduler.queue_poll_failed", full=full, error=str(exc))
+            await self._notify_github_unhealthy(str(exc), operation="queue_poll")
             if full:
                 self._last_full_poll = now
             self._last_queue_poll = now
@@ -242,6 +246,7 @@ class Scheduler:
     async def _reconcile_locked(self) -> None:
         now = datetime.now(UTC)
         self._expire_manual(now)
+        await self._notify_stuck_jobs(now)
         self._docker_connected = await self.docker.ping()
         if not self._docker_connected:
             raise RuntimeError("Docker Engine is unavailable")
@@ -302,7 +307,9 @@ class Scheduler:
             except Exception as exc:
                 self._github_connected = False
                 self._last_error = str(exc)
+                await self._notify_github_unhealthy(str(exc), operation="runner_discovery")
         by_name = {str(runner["name"]): runner for runner in github_runners}
+        previous_by_name = {runner.name: runner for runner in self._runners}
 
         live: list[ManagedRunner] = []
         for runner in containers:
@@ -311,6 +318,20 @@ class Scheduler:
                 await self.docker.remove_runner(runner, "unknown_pool")
                 continue
             if runner.container_status in {"exited", "dead"}:
+                previous = previous_by_name.get(runner.name)
+                if runner.exit_code not in {0} and (
+                    previous is None or previous.state == "starting"
+                ):
+                    await self._notify_runner_failure(
+                        "Runner container exited before becoming available",
+                        pool=runner.pool,
+                        repository=runner.repository,
+                        runner=runner.name,
+                        error=(
+                            f"container status {runner.container_status}, "
+                            f"exit code {runner.exit_code}"
+                        ),
+                    )
                 await self.docker.remove_runner(runner, "container_exited")
                 self._clear_timers(runner.name)
                 continue
@@ -343,6 +364,13 @@ class Scheduler:
             else:
                 runner.state = "starting"
                 if age >= pool.registration_timeout:
+                    await self._notify_runner_failure(
+                        "Runner did not register with GitHub in time",
+                        pool=runner.pool,
+                        repository=runner.repository,
+                        runner=runner.name,
+                        error=f"registration timed out after {pool.registration_timeout}s",
+                    )
                     await self.docker.remove_runner(runner, "registration_timeout")
                     self._clear_timers(runner.name)
                     continue
@@ -475,6 +503,12 @@ class Scheduler:
                     self._pool_errors[pool_name] = str(exc)
                     RUNNER_CREATION_FAILURES.labels(pool=pool_name).inc()
                     log.exception("runner.create_failed", pool=pool_name, error=str(exc))
+                    await self._notify_runner_failure(
+                        "Runner startup failed",
+                        pool=pool_name,
+                        repository=target_repository,
+                        error=str(exc),
+                    )
                     break
 
             removal_count = max(0, len(pool_runners) - decision.target)
@@ -542,6 +576,73 @@ class Scheduler:
         self._update_metrics()
         await self.docker.prune_logs()
 
+    async def _notify_github_unhealthy(self, error: str, *, operation: str) -> None:
+        if not self.notifications:
+            return
+        await self.notifications.send(
+            "github_connection_unhealthy",
+            "GitHub connection is unhealthy",
+            f"EasyRunners could not complete {operation}.",
+            details={"operation": operation, "error": error},
+            key="github_connection_unhealthy",
+        )
+
+    async def _notify_runner_failure(
+        self,
+        message: str,
+        *,
+        pool: str,
+        repository: str | None,
+        error: str,
+        runner: str | None = None,
+    ) -> None:
+        if not self.notifications:
+            return
+        await self.notifications.send(
+            "runner_startup_failure",
+            "Runner startup failed",
+            message,
+            details={
+                "pool": pool,
+                "repository": repository,
+                "runner": runner,
+                "error": error,
+            },
+            key=f"runner_startup_failure:{pool}:{repository or 'organization'}",
+        )
+
+    async def _notify_stuck_jobs(self, now: datetime) -> None:
+        if not self.notifications or not self.notifications.configured:
+            return
+        jobs = await self.demand.snapshot()
+        stuck = [
+            job
+            for job in jobs
+            if job.status == "queued"
+            and (now - job.queued_at).total_seconds()
+            >= self.settings.notification_stuck_job_seconds
+        ]
+        if not stuck:
+            return
+        await asyncio.gather(
+            *(
+                self.notifications.send(
+                    "job_stuck",
+                    "GitHub Actions job is still queued",
+                    f"{job.name or job.id} has waited for a runner.",
+                    details={
+                        "job_id": job.id,
+                        "repository": job.repository,
+                        "pool": job.pool,
+                        "labels": job.labels,
+                        "queued_seconds": int((now - job.queued_at).total_seconds()),
+                    },
+                    key=f"job_stuck:{job.id}",
+                )
+                for job in stuck
+            )
+        )
+
     def _clear_timers(self, name: str) -> None:
         self._busy_since.pop(name, None)
         self._idle_since.pop(name, None)
@@ -561,6 +662,7 @@ class Scheduler:
     async def status(self) -> dict[str, Any]:
         queued = await self.demand.queued_counts()
         now = datetime.now(UTC)
+        host = await self._host_capacity_status()
         pools: dict[str, Any] = {}
         for name, config in self.settings.runner_pools.items():
             runners = [runner for runner in self._runners if runner.pool == name]
@@ -587,6 +689,7 @@ class Scheduler:
                 "labels": sorted(config.effective_labels),
                 "config": config.model_dump(mode="json"),
                 "last_error": self._pool_errors.get(name),
+                "available_capacity": host.get("pool_capacity", {}).get(name),
                 "manual_floor": sum(floor.desired for _, floor in pool_manual_floors),
                 "manual_floor_expires_at": min(
                     (floor.expires_at.isoformat() for _, floor in pool_manual_floors),
@@ -600,9 +703,73 @@ class Scheduler:
             "docker": "connected" if self._docker_connected else "disconnected",
             "target": credentials.connection.target_name if credentials else None,
             "pools": pools,
+            "host": host,
             "last_reconcile": self._last_reconcile.isoformat() if self._last_reconcile else None,
             "last_error": self._last_error,
             "time": now.isoformat(),
+        }
+
+    async def _host_capacity_status(self) -> dict[str, Any]:
+        try:
+            resources = await self.docker.host_resources()
+        except Exception as exc:
+            return {"available": False, "error": str(exc), "pool_capacity": {}}
+        active = [runner for runner in self._runners if runner.state != "exited"]
+        cpu_reserved = sum(
+            self.settings.runner_pools[runner.pool].cpu
+            for runner in active
+            if runner.pool in self.settings.runner_pools
+        )
+        memory_reserved = sum(
+            parse_byte_size(self.settings.runner_pools[runner.pool].memory)
+            for runner in active
+            if runner.pool in self.settings.runner_pools
+        )
+        cpu_total = float(resources.get("cpus_total") or 0)
+        memory_total = int(resources.get("memory_total_bytes") or 0)
+        cpu_available = max(0.0, cpu_total - cpu_reserved)
+        memory_available = max(0, memory_total - memory_reserved)
+        active_by_pool = Counter(runner.pool for runner in active)
+        pool_capacity: dict[str, int] = {}
+        for name, pool in self.settings.runner_pools.items():
+            configured_slots = max(0, pool.max - active_by_pool[name])
+            cpu_slots = int(cpu_available // pool.cpu) if cpu_total else configured_slots
+            pool_memory = parse_byte_size(pool.memory)
+            memory_slots = (
+                memory_available // pool_memory
+                if memory_total and pool_memory
+                else configured_slots
+            )
+            pool_capacity[name] = max(
+                0, min(configured_slots, cpu_slots, int(memory_slots))
+            )
+        disk_total = int(resources.get("disk_total_bytes") or 0)
+        disk_free = int(resources.get("disk_free_bytes") or 0)
+        disk_free_percent = round(disk_free * 100 / disk_total, 1) if disk_total else None
+        pressure: list[str] = []
+        if cpu_total and cpu_available < min(
+            (pool.cpu for pool in self.settings.runner_pools.values()), default=1
+        ):
+            pressure.append("cpu")
+        if memory_total and memory_available < min(
+            (parse_byte_size(pool.memory) for pool in self.settings.runner_pools.values()),
+            default=1,
+        ):
+            pressure.append("memory")
+        if disk_free_percent is not None and disk_free_percent < 10:
+            pressure.append("disk")
+        return {
+            **resources,
+            "available": True,
+            "cpus_reserved": round(cpu_reserved, 2),
+            "cpus_available": round(cpu_available, 2),
+            "memory_reserved_bytes": memory_reserved,
+            "memory_available_bytes": memory_available,
+            "disk_free_percent": disk_free_percent,
+            "active_runners": len(active),
+            "available_runner_capacity": max(pool_capacity.values(), default=0),
+            "pool_capacity": pool_capacity,
+            "pressure": pressure,
         }
 
     def runners(self) -> list[dict[str, Any]]:

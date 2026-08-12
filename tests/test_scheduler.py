@@ -95,6 +95,37 @@ class FakeDocker:
     async def prune_logs(self):
         return None
 
+    async def host_resources(self):
+        return {
+            "cpus_total": 8,
+            "memory_total_bytes": 16 * 1024**3,
+            "disk_total_bytes": 100 * 1024**3,
+            "disk_free_bytes": 75 * 1024**3,
+        }
+
+
+class FakeNotifications:
+    configured = True
+
+    def __init__(self) -> None:
+        self.events: list[tuple[str, dict[str, Any]]] = []
+
+    async def send(self, event, title, message, **kwargs):
+        self.events.append((event, kwargs.get("details") or {}))
+        return True
+
+
+class FailingDocker(FakeDocker):
+    async def create_runner(
+        self, pool_name, pool, registration_token, target_url, repository=None
+    ):
+        raise RuntimeError("runner image could not start")
+
+
+class FailingGitHub(FakeGitHub):
+    async def queued_jobs(self, repositories=None):
+        raise RuntimeError("GitHub installation token failed")
+
 
 @pytest.mark.asyncio
 async def test_reconcile_creates_capacity_once_under_concurrency(settings, tmp_path: Path) -> None:
@@ -159,6 +190,107 @@ async def test_job_view_explains_when_no_pool_matches(settings, tmp_path: Path) 
     jobs = await scheduler.job_views()
     assert jobs[0]["waiting_code"] == "no_matching_pool"
     assert "requested label" in jobs[0]["waiting_reason"]
+    database.close()
+
+
+@pytest.mark.asyncio
+async def test_status_reports_host_limited_runner_capacity(settings, tmp_path: Path) -> None:
+    database = Database(tmp_path / "state.sqlite3")
+    demand = DemandTracker(settings.runner_pools, database)
+    scheduler = Scheduler(settings, FakeGitHub(), FakeDocker(), demand)
+    status = await scheduler.status()
+    assert status["host"]["available"] is True
+    assert status["host"]["cpus_available"] == 8
+    assert status["host"]["memory_available_bytes"] == 16 * 1024**3
+    assert status["host"]["available_runner_capacity"] == 2
+    assert status["pools"]["default"]["available_capacity"] == 2
+    database.close()
+
+
+@pytest.mark.asyncio
+async def test_stuck_job_sends_failure_notification(settings, tmp_path: Path) -> None:
+    configured = settings.model_copy(update={"notification_stuck_job_seconds": 60})
+    database = Database(tmp_path / "state.sqlite3")
+    demand = DemandTracker(configured.runner_pools, database)
+    await demand.apply_poll(
+        [
+            WorkflowJob(
+                id=77,
+                repository="peer/repo",
+                labels=["self-hosted", "docker"],
+                status="queued",
+                queued_at=datetime.now(UTC) - timedelta(minutes=5),
+            )
+        ],
+        stale_after_seconds=600,
+    )
+    notifications = FakeNotifications()
+    scheduler = Scheduler(
+        configured,
+        FakeGitHub(),
+        FakeDocker(),
+        demand,
+        notifications,
+    )
+    await scheduler.reconcile("test")
+    assert notifications.events[0][0] == "job_stuck"
+    assert notifications.events[0][1]["job_id"] == 77
+    database.close()
+
+
+@pytest.mark.asyncio
+async def test_runner_startup_failure_sends_notification(settings, tmp_path: Path) -> None:
+    database = Database(tmp_path / "state.sqlite3")
+    demand = DemandTracker(settings.runner_pools, database)
+    await demand.apply_poll(
+        [
+            WorkflowJob(
+                id=88,
+                repository="peer/repo",
+                labels=["self-hosted", "docker"],
+                status="queued",
+            )
+        ],
+        stale_after_seconds=600,
+    )
+    notifications = FakeNotifications()
+    scheduler = Scheduler(
+        settings,
+        FakeGitHub(),
+        FailingDocker(),
+        demand,
+        notifications,
+    )
+    await scheduler.reconcile("test")
+    assert notifications.events[-1][0] == "runner_startup_failure"
+    assert notifications.events[-1][1]["pool"] == "default"
+    database.close()
+
+
+@pytest.mark.asyncio
+async def test_unhealthy_github_connection_sends_notification(
+    settings, tmp_path: Path
+) -> None:
+    database = Database(tmp_path / "state.sqlite3")
+    demand = DemandTracker(settings.runner_pools, database)
+    notifications = FakeNotifications()
+    scheduler = Scheduler(
+        settings,
+        FailingGitHub(),
+        FakeDocker(),
+        demand,
+        notifications,
+    )
+    await scheduler.poll_demand(full=True)
+    assert notifications.events == [
+        (
+            "github_connection_unhealthy",
+            {
+                "operation": "queue_poll",
+                "error": "GitHub installation token failed",
+            },
+        )
+    ]
     database.close()
 
 
