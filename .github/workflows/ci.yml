@@ -14,7 +14,7 @@ concurrency:
 
 jobs:
   python:
-    runs-on: ubuntu-latest
+    runs-on: [self-hosted, linux, docker]
     steps:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
       - uses: astral-sh/setup-uv@d0d8abe699bfb85fec6de9f7adb5ae17292296ff # v6
@@ -27,7 +27,7 @@ jobs:
       - run: uv lock --check
 
   containers:
-    runs-on: ubuntu-latest
+    runs-on: [self-hosted, linux, docker]
     strategy:
       fail-fast: false
       matrix:
