@@ -169,7 +169,7 @@ class DockerRunnerManager:
             RUNNER_ID_LABEL: runner_id,
             RUNNER_NAME_LABEL: name,
             CREATED_LABEL: now.isoformat(),
-            "com.easy-runners.labels": ",".join(sorted(pool.effective_labels)),
+            "com.easy-runners.labels": ",".join(sorted(pool.matching_labels)),
         }
         if repository:
             labels[REPOSITORY_LABEL] = repository
@@ -226,7 +226,7 @@ class DockerRunnerManager:
             container_id=container.id,
             container_status="running",
             created_at=now,
-            labels=sorted(pool.effective_labels),
+            labels=sorted(pool.matching_labels),
             repository=repository,
             state="starting",
         )

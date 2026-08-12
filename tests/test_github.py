@@ -510,7 +510,7 @@ async def test_repository_adoption_finds_hosted_jobs_and_exact_replacement(
     store.save_installation(99)
     monkeypatch.setattr(client.auth, "app_jwt", lambda *args: "jwt")
     pools = {
-        "ci": RunnerPoolConfig(labels=["ci"], docker_mode=DockerMode.NONE),
+        "standard": RunnerPoolConfig(labels=["standard"], docker_mode=DockerMode.NONE),
         "docker": RunnerPoolConfig(labels=["docker"], docker_mode=DockerMode.SOCKET),
     }
     adoption = await client.repository_adoption(pools)
@@ -525,8 +525,8 @@ async def test_repository_adoption_finds_hosted_jobs_and_exact_replacement(
     assert adoption["repository_count_scanned"] == 2
     assert adoption["scan"]["scanning"] is False
     assert adoption["scan"]["completed"] == 2
-    assert adoption["recommended_pool"] == "ci"
-    assert adoption["recommended_runs_on"] == "runs-on: [self-hosted, linux, ci]"
+    assert adoption["recommended_pool"] == "standard"
+    assert adoption["recommended_runs_on"] == "runs-on: [self-hosted, linux, standard]"
     assert adoption["replacements"]["docker"]["runs_on"].endswith("linux, docker]")
     cached = await client.repository_adoption(
         {"safe": RunnerPoolConfig(labels=["safe"], docker_mode=DockerMode.NONE)}
@@ -567,7 +567,9 @@ async def test_repository_adoption_runs_in_background_and_reports_progress(
     monkeypatch.setattr(client, "list_repositories", list_repositories)
     monkeypatch.setattr(client, "_repository_adoption", scan)
     client.settings.poll_concurrency = 2
-    pools = {"ci": RunnerPoolConfig(labels=["ci"], docker_mode=DockerMode.NONE)}
+    pools = {
+        "standard": RunnerPoolConfig(labels=["standard"], docker_mode=DockerMode.NONE)
+    }
 
     initial = await client.repository_adoption(pools, wait=False)
     assert initial["scan"]["scanning"] is True
@@ -638,7 +640,9 @@ async def test_repository_adoption_batches_and_prioritizes_unscanned_repositorie
     monkeypatch.setattr(client, "_repository_adoption", scan)
     client.settings.poll_concurrency = 1
     client.settings.adoption_max_repositories = 2
-    pools = {"ci": RunnerPoolConfig(labels=["ci"], docker_mode=DockerMode.NONE)}
+    pools = {
+        "standard": RunnerPoolConfig(labels=["standard"], docker_mode=DockerMode.NONE)
+    }
 
     result = await client.repository_adoption(pools, refresh=True)
     assert scanned == ["peer/new", "peer/unverified"]

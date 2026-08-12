@@ -93,9 +93,12 @@ def test_dependency_and_release_automation_is_configured() -> None:
     assert "x-release-please-version" in (REPOSITORY_ROOT / "uv.lock").read_text()
 
 
-def test_default_config_offers_a_no_socket_ci_pool() -> None:
+def test_default_config_has_standard_and_docker_pools() -> None:
     config = yaml.safe_load((REPOSITORY_ROOT / "config.yaml").read_text())
-    ci = config["runner_pools"]["ci"]
-    assert ci["docker_mode"] == "none"
-    assert "ci" in ci["labels"]
-    assert config["runner_pools"]["default"]["docker_mode"] == "socket"
+    pools = config["runner_pools"]
+    assert set(pools) == {"standard", "docker"}
+    assert pools["standard"]["docker_mode"] == "none"
+    assert "standard" in pools["standard"]["labels"]
+    assert pools["standard"]["aliases"] == ["ci", "rust"]
+    assert pools["docker"]["docker_mode"] == "socket"
+    assert "docker" in pools["docker"]["labels"]

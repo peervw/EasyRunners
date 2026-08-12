@@ -405,6 +405,27 @@ def test_saved_diagnostic_settings_load_on_restart(settings, monkeypatch) -> Non
         assert app.state.settings.runner_log_retention_days == 30
 
 
+def test_saved_builtin_pools_migrate_on_restart(settings, monkeypatch) -> None:
+    database = Database(settings.data_dir / "easyrunners.sqlite3")
+    legacy = json.dumps(
+        {
+            "default": {"labels": ["docker"], "docker_mode": "socket"},
+            "rust": {"labels": ["rust"], "docker_mode": "none"},
+        }
+    )
+    database.set_setting("runner_pools_override", legacy)
+    database.close()
+    monkeypatch.setattr(main_module, "DockerRunnerManager", NoopDocker)
+    app = create_app(settings, start_scheduler=False)
+    with TestClient(app):
+        assert set(app.state.settings.runner_pools) == {"standard", "docker"}
+        assert app.state.settings.runner_pools["standard"].aliases == ["ci", "rust"]
+        assert (
+            app.state.database.get_setting("runner_pools_override_pre_standard")
+            == legacy
+        )
+
+
 def test_runner_request_carries_repository_and_pool(client, monkeypatch) -> None:
     test_client, app = client
     _, csrf = login(test_client, app)
@@ -415,17 +436,17 @@ def test_runner_request_carries_repository_and_pool(client, monkeypatch) -> None
     app.state.github_store.save_installation(2, repository_selection="selected")
 
     async def test_runner(pool=None, repository=None):
-        assert pool == "rust"
+        assert pool == "standard"
         assert repository == "peer/two"
         return {"pool": pool, "repository": repository}
 
     monkeypatch.setattr(app.state.scheduler, "test_runner", test_runner)
     response = test_client.post(
-        "/api/readiness/test-runner?pool=rust&repository=peer/two",
+        "/api/readiness/test-runner?pool=standard&repository=peer/two",
         headers={"X-CSRF-Token": csrf},
     )
     assert response.status_code == 200
-    assert response.json() == {"pool": "rust", "repository": "peer/two"}
+    assert response.json() == {"pool": "standard", "repository": "peer/two"}
 
 
 def test_webhook_signature_replay_and_demand(client) -> None:

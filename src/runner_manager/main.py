@@ -17,7 +17,7 @@ from fastapi.templating import Jinja2Templates
 
 from runner_manager.api import router
 from runner_manager.auth import AuthManager
-from runner_manager.config import Settings, load_settings
+from runner_manager.config import Settings, load_settings, migrate_legacy_pools
 from runner_manager.database import Database
 from runner_manager.demand import DemandTracker
 from runner_manager.docker import DockerRunnerManager
@@ -61,10 +61,28 @@ def create_app(settings: Settings | None = None, *, start_scheduler: bool = True
         database = Database(configured.data_dir / "easyrunners.sqlite3", configured.history_limit)
         if saved_pools := database.get_setting("runner_pools_override"):
             try:
-                configured.runner_pools = {
+                saved_pool_config = {
                     name: RunnerPoolConfig.model_validate(pool)
                     for name, pool in json.loads(saved_pools).items()
                 }
+                configured.runner_pools, migrations = migrate_legacy_pools(
+                    saved_pool_config
+                )
+                if migrations:
+                    if not database.get_setting("runner_pools_override_pre_standard"):
+                        database.set_setting(
+                            "runner_pools_override_pre_standard", saved_pools
+                        )
+                    migrated_payload = {
+                        name: pool.model_dump(mode="json")
+                        for name, pool in configured.runner_pools.items()
+                    }
+                    database.set_setting(
+                        "runner_pools_override", json.dumps(migrated_payload)
+                    )
+                    structlog.get_logger().info(
+                        "config.runner_pools_migrated", changes=migrations
+                    )
             except (TypeError, ValueError) as exc:
                 structlog.get_logger().error("config.saved_pools_invalid", error=str(exc))
         if saved_diagnostics := database.get_setting("diagnostic_settings"):

@@ -129,7 +129,7 @@
                   <label for="quickstart-pool">Runner pool</label>
                   <select id="quickstart-pool" aria-label="Runner pool"></select>
                   <div class="code-copy">
-                    <code id="runs-on-line">runs-on: [self-hosted, linux, docker]</code>
+                    <code id="runs-on-line">runs-on: [self-hosted, linux, standard]</code>
                     <button id="copy-runs-on" class="secondary compact" type="button" aria-label="Copy runs-on line">Copy</button>
                   </div>
                   <p class="help-text">Replace the job's existing <code>runs-on</code> value and push the workflow.</p>
@@ -288,18 +288,21 @@
             <section id="pool-editor" class="card settings-card">
               <div class="settings-row">
                 <div class="settings-copy"><h2>Pool configuration</h2><p>Add or update a runner pool.</p></div>
-                <button id="rust-pool" class="ghost compact" type="button">Rust preset</button>
+                <div class="actions">
+                  <button id="standard-pool" class="ghost compact" type="button">Standard preset</button>
+                  <button id="docker-pool" class="ghost compact" type="button">Docker preset</button>
+                </div>
               </div>
               <div class="settings-body">
-                <form id="pool-form" class="form-grid">
-                  <label>Name<input name="pool_name" value="default" pattern="[A-Za-z0-9_.-]+" required></label>
-                  <label>Labels<input name="labels" value="self-hosted,linux,docker" required></label>
+                <form id="pool-form" class="form-grid" data-aliases='["ci","rust"]'>
+                  <label>Name<input name="pool_name" value="standard" pattern="[A-Za-z0-9_.-]+" required></label>
+                  <label>Labels<input name="labels" value="self-hosted,linux,standard" required></label>
                   <label>Minimum<input name="min" type="number" min="0" value="0" required></label>
                   <label>Maximum<input name="max" type="number" min="0" value="5" required></label>
                   <label>CPU cores<input name="cpu" type="number" min="0.1" step="0.1" value="4" required></label>
                   <label>Memory<input name="memory" value="8g" required></label>
                   <label>Runner image<input name="image" placeholder="Default image"></label>
-                  <label>Docker access<select name="docker_mode"><option value="socket">Docker socket</option><option value="none">No Docker</option></select></label>
+                  <label>Docker access<select name="docker_mode"><option value="none" selected>No Docker</option><option value="socket">Docker socket</option></select></label>
                   <div class="form-submit"><button type="submit">Save pool</button></div>
                 </form>
                 <details class="subtle-details yaml-settings">

@@ -19,9 +19,11 @@ manager:
   notification_cooldown_seconds: 900
 
 runner_pools:
-  # Recommended for tests, linting, and builds that do not invoke Docker.
-  ci:
-    labels: [self-hosted, linux, ci]
+  # Recommended for tests, linting, compilation, and other ordinary jobs.
+  standard:
+    labels: [self-hosted, linux, standard]
+    # Keep existing ci/rust workflow labels working while repositories migrate.
+    aliases: [ci, rust]
     min: 0
     max: 5
     priority: 20
@@ -34,7 +36,7 @@ runner_pools:
     docker_mode: none
 
   # Use only for workflows that actually need Docker builds or containers.
-  default:
+  docker:
     labels: [self-hosted, linux, docker]
     min: 0
     max: 5
@@ -47,21 +49,7 @@ runner_pools:
     max_lifetime: 3900
     docker_mode: socket
 
-  # Rust uses the same universal image and stays away from the Docker socket.
-  rust:
-    labels: [self-hosted, linux, rust]
-    min: 0
-    max: 5
-    priority: 10
-    cpu: 4
-    memory: 8g
-    pids_limit: 1024
-    idle_timeout: 60
-    job_timeout: 3600
-    max_lifetime: 3900
-    docker_mode: none
-
-  # Keep deploy credentials and mounts out of the default CI pool.
+  # Keep deploy credentials and mounts out of the standard pool.
   # deploy:
   #   labels: [self-hosted, linux, deploy]
   #   min: 0

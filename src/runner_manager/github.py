@@ -724,6 +724,10 @@ class GitHubClient:
 
     @staticmethod
     def _recommended_pool(pools: dict[str, RunnerPoolConfig]) -> str | None:
+        if "standard" in pools:
+            return "standard"
+        # Older installations used `ci`; continue to recommend it until the
+        # persisted pool configuration is migrated.
         if "ci" in pools:
             return "ci"
         non_docker = sorted(

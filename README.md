@@ -78,14 +78,11 @@ In each existing workflow job, replace its hosted runner line:
 # before
 runs-on: ubuntu-latest
 
-# Tests, linting, and builds that do not invoke Docker (recommended)
-runs-on: [self-hosted, linux, ci]
+# Tests, linting, Rust, and builds that do not invoke Docker (recommended)
+runs-on: [self-hosted, linux, standard]
 
 # Docker jobs
 runs-on: [self-hosted, linux, docker]
-
-# Rust jobs
-runs-on: [self-hosted, linux, rust]
 ```
 
 Push the change. The dashboard shows the job as queued, creates a fresh runner for that repository,
@@ -198,8 +195,9 @@ can also be edited in the dashboard or imported/exported as YAML. Dashboard over
 
 ```yaml
 runner_pools:
-  ci:
-    labels: [self-hosted, linux, ci]
+  standard:
+    labels: [self-hosted, linux, standard]
+    aliases: [ci, rust] # temporary compatibility for existing workflows
     min: 0
     max: 5
     priority: 20
@@ -207,7 +205,7 @@ runner_pools:
     memory: 8g
     docker_mode: none
 
-  default:
+  docker:
     labels: [self-hosted, linux, docker]
     min: 0
     max: 5
@@ -216,15 +214,6 @@ runner_pools:
     job_timeout: 3600
     max_lifetime: 3900
     docker_mode: socket
-
-  rust:
-    labels: [self-hosted, linux, rust]
-    min: 0
-    max: 5
-    priority: 10
-    cpu: 4
-    memory: 8g
-    docker_mode: none
 
   deploy:
     labels: [self-hosted, linux, deploy]
@@ -247,11 +236,12 @@ sensitive pools a unique discriminator such as `deploy`.
 Use a pool with:
 
 ```yaml
-runs-on: [self-hosted, linux, ci] # no Docker socket
+runs-on: [self-hosted, linux, standard] # no Docker socket
 runs-on: [self-hosted, linux, docker]
 ```
 
-The `ci` pool is the recommended default for ordinary tests, linting, compilation, and Rust work.
+The `standard` pool is the recommended default for ordinary tests, linting, compilation, and Rust
+work.
 It uses the same universal image without mounting the root-equivalent Docker socket. Choose the
 `docker` label only for jobs that actually run Docker or Compose. Both pools scale to zero.
 
@@ -262,11 +252,11 @@ See [Python CI](examples/python-ci.yaml), [Rust CI](examples/rust-ci.yaml),
 
 The universal image includes rustup, the stable minimal Rust toolchain, Clippy, rustfmt, `clang`,
 `lld`, CMake, OpenSSL headers, `pkg-config`, and Protobuf. Compose builds and stores that image once;
-every ephemeral runner reuses its local read-only layers, so a Rust pool does not require another
+every ephemeral runner reuses its local read-only layers, so Rust does not require another
 build or image download.
 
-The `rust` pool remains useful, but only as a label, capacity, and security boundary. By default it
-does not receive the Docker socket, while the `docker` pool does. Both launch the same image.
+Rust jobs use the `standard` pool by default. It has the complete Rust toolchain but no Docker
+socket. Use the `docker` pool only when the job also builds or runs containers.
 
 Rust workflows use GitHub's remote Actions cache through `Swatinem/rust-cache`, pinned to an
 immutable commit. It keys Cargo downloads and dependency build artifacts using the compiler,
@@ -278,19 +268,22 @@ Set `RUST_TOOLCHAIN` before building the image to bake a specific channel or ver
 toolchain not present in the image, install that toolchain in the workflow or rebuild the universal
 image with the same pin.
 
-For an existing installation whose dashboard pool configuration already overrides `config.yaml`,
-click **Rust preset**, review the capacity, and save it. For a new installation the `rust` pool is
-present automatically with `min: 0`, so it consumes no runner capacity until a matching job queues.
+Recognizable built-in `ci`/`rust` and `default` dashboard overrides migrate automatically to
+`standard` and `docker` on restart; EasyRunners keeps a backup of the old JSON in its database.
+Custom variants are preserved. The standard runner temporarily registers `ci` and `rust` aliases,
+so existing workflows continue to run while their labels are changed to `standard`. Workflows
+already using the `docker` label do not need to change.
 
 ### Connect a Rust repository
 
 1. In the GitHub App installation, ensure the Rust repository is selected. Reconnecting EasyRunners
    is not necessary when adding another repository to the same installation.
-2. Confirm that the dashboard readiness check finds the runner image and that the `rust` pool appears.
+2. Confirm that the dashboard readiness check finds the runner image and that the `standard` pool
+   appears.
 3. In the target repository, copy `examples/rust-ci.yaml` to `.github/workflows/rust-ci.yml`, or copy
    the Rust `runs-on` line from the dashboard.
 4. Commit and push the workflow. A job requesting
-   `[self-hosted, linux, rust]` queues, EasyRunners starts one ephemeral runner container, and the
+   `[self-hosted, linux, standard]` queues, EasyRunners starts one ephemeral runner container, and the
    container disappears after the job.
 
 The example workflow assumes a committed `Cargo.lock` and a workspace compatible with
@@ -385,7 +378,7 @@ Endpoints:
 - `PUT|DELETE /api/pools/{pool}` and YAML pool import/export endpoints
 - `POST /api/pools/{pool}/scale` with
   `{"desired": 2, "ttl_seconds": 600, "repository": "owner/repository"}`
-- `POST /api/readiness/test-runner?pool=rust&repository=owner/repository` to pre-warm one runner for
+- `POST /api/readiness/test-runner?pool=standard&repository=owner/repository` to pre-warm one runner for
   five minutes
 - `POST /api/reconcile`
 - `GET|POST /api/auth/tokens` and `DELETE /api/auth/tokens/{id}`

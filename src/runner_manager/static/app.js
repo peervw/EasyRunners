@@ -665,10 +665,10 @@ async function refresh() {
   }
 }
 
-function fillPool(name = 'default', config = null) {
+function fillPool(name = 'standard', config = null) {
   selectAppView('settings');
   const form = document.querySelector('#pool-form');
-  const value = config || {labels: ['self-hosted', 'linux', name], min: 0, max: 5, cpu: 4, memory: '8g', docker_mode: 'socket'};
+  const value = config || {labels: ['self-hosted', 'linux', name], min: 0, max: 5, cpu: 4, memory: '8g', docker_mode: 'none'};
   form.pool_name.value = name;
   form.labels.value = value.labels.join(',');
   form.min.value = value.min;
@@ -677,6 +677,7 @@ function fillPool(name = 'default', config = null) {
   form.memory.value = value.memory;
   form.image.value = value.image || '';
   form.docker_mode.value = value.docker_mode;
+  form.dataset.aliases = JSON.stringify(value.aliases || []);
   form.scrollIntoView({behavior: 'smooth', block: 'center'});
 }
 
@@ -817,14 +818,19 @@ document.querySelector('#pool-form')?.addEventListener('submit', async event => 
     min: Number(form.min.value), max: Number(form.max.value), cpu: Number(form.cpu.value),
     memory: form.memory.value, image: form.image.value || null,
     docker_mode: form.docker_mode.value,
+    aliases: JSON.parse(form.dataset.aliases || '[]'),
   };
   const result = await action(() => json(`/api/pools/${encodeURIComponent(name)}`, {method: 'PUT', headers, body: JSON.stringify(body)}), 'Pool saved.');
   if (result) refresh();
 });
 document.querySelector('#new-pool')?.addEventListener('click', () => fillPool('new-pool'));
-document.querySelector('#rust-pool')?.addEventListener('click', () => fillPool('rust', {
-  labels: ['self-hosted', 'linux', 'rust'], min: 0, max: 5,
-  cpu: 4, memory: '8g', image: null, docker_mode: 'none',
+document.querySelector('#standard-pool')?.addEventListener('click', () => fillPool('standard', {
+  labels: ['self-hosted', 'linux', 'standard'], min: 0, max: 5,
+  cpu: 4, memory: '8g', image: null, docker_mode: 'none', aliases: ['ci', 'rust'],
+}));
+document.querySelector('#docker-pool')?.addEventListener('click', () => fillPool('docker', {
+  labels: ['self-hosted', 'linux', 'docker'], min: 0, max: 5,
+  cpu: 4, memory: '8g', image: null, docker_mode: 'socket',
 }));
 document.querySelector('#export-pools')?.addEventListener('click', async () => {
   await action(async () => {

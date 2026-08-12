@@ -105,12 +105,12 @@ async def test_create_runner_applies_security_and_resources(settings) -> None:
 
 
 @pytest.mark.asyncio
-async def test_rust_pool_uses_universal_image(settings) -> None:
+async def test_standard_pool_uses_universal_image(settings) -> None:
     client = FakeClient()
     manager = DockerRunnerManager(settings, client)
     await manager.create_runner(
-        "rust",
-        RunnerPoolConfig(labels=["rust"], docker_mode="none"),
+        "standard",
+        RunnerPoolConfig(labels=["standard"], docker_mode="none"),
         "token",
         "https://github.com/o/r",
     )

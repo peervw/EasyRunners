@@ -17,9 +17,11 @@ def match_pool(labels: list[str], pools: dict[str, RunnerPoolConfig]) -> str | N
     required = {label.lower() for label in labels}
     candidates: list[tuple[int, int, str]] = []
     for name, pool in pools.items():
-        available = pool.effective_labels
+        available = pool.matching_labels
         if required <= available:
-            candidates.append((len(available - required), -pool.priority, name))
+            preferred = pool.effective_labels
+            scoring_labels = preferred if required <= preferred else available
+            candidates.append((len(scoring_labels - required), -pool.priority, name))
     return min(candidates)[2] if candidates else None
 
 

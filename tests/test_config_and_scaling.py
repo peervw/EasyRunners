@@ -3,9 +3,14 @@ from datetime import UTC, datetime
 import pytest
 from pydantic import ValidationError
 
-from runner_manager.config import Settings
+from runner_manager.config import Settings, migrate_legacy_pools
 from runner_manager.demand import match_pool
-from runner_manager.models import NATIVE_ARCHITECTURE, ManagedRunner, RunnerPoolConfig
+from runner_manager.models import (
+    NATIVE_ARCHITECTURE,
+    DockerMode,
+    ManagedRunner,
+    RunnerPoolConfig,
+)
 from runner_manager.scheduler import calculate_scale
 
 
@@ -21,12 +26,54 @@ def test_pool_normalizes_effective_and_custom_labels() -> None:
 
 
 def test_all_pools_use_universal_image_unless_overridden(settings) -> None:
-    rust = RunnerPoolConfig(labels=["rust"], docker_mode="none")
+    standard = RunnerPoolConfig(labels=["standard"], docker_mode="none")
     base = RunnerPoolConfig(labels=["docker"], docker_mode="none")
-    custom = rust.model_copy(update={"image": "registry.example/custom-rust:1"})
-    assert settings.image_for_pool(rust) == settings.runner_image
+    custom = standard.model_copy(update={"image": "registry.example/custom-runner:1"})
+    assert settings.image_for_pool(standard) == settings.runner_image
     assert settings.image_for_pool(base) == settings.runner_image
-    assert settings.image_for_pool(custom) == "registry.example/custom-rust:1"
+    assert settings.image_for_pool(custom) == "registry.example/custom-runner:1"
+
+
+def test_runner_pool_defaults_to_no_docker_socket() -> None:
+    assert RunnerPoolConfig().docker_mode == DockerMode.NONE
+
+
+def test_legacy_builtin_pools_migrate_without_breaking_workflow_labels() -> None:
+    common = {"min": 0, "max": 5, "cpu": 4, "memory": "8g"}
+    pools, changes = migrate_legacy_pools(
+        {
+            "ci": RunnerPoolConfig(
+                labels=["ci"], docker_mode=DockerMode.NONE, priority=20, **common
+            ),
+            "rust": RunnerPoolConfig(
+                labels=["rust"], docker_mode=DockerMode.NONE, priority=10, **common
+            ),
+            "default": RunnerPoolConfig(
+                labels=["docker"], docker_mode=DockerMode.SOCKET, **common
+            ),
+        }
+    )
+    assert set(pools) == {"standard", "docker"}
+    assert pools["standard"].aliases == ["ci", "rust"]
+    assert match_pool(["self-hosted", "linux", "standard"], pools) == "standard"
+    assert match_pool(["self-hosted", "linux", "rust"], pools) == "standard"
+    assert match_pool(["self-hosted", "linux", "ci"], pools) == "standard"
+    assert match_pool(["self-hosted", "linux", "docker"], pools) == "docker"
+    assert match_pool(["self-hosted", "linux"], pools) == "standard"
+    assert changes
+
+
+def test_legacy_migration_preserves_custom_pool_variants() -> None:
+    pools, _ = migrate_legacy_pools(
+        {
+            "ci": RunnerPoolConfig(labels=["ci"], docker_mode=DockerMode.NONE),
+            "rust": RunnerPoolConfig(
+                labels=["rust"], docker_mode=DockerMode.NONE, max=9
+            ),
+        }
+    )
+    assert "standard" in pools
+    assert "rust" in pools
 
 
 def test_pool_rejects_invalid_limits() -> None:
