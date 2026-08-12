@@ -14,6 +14,11 @@ let usagePeriod = '24h';
 let adoptionData = {repositories: [], replacements: {}};
 let githubData = {configured: false, installed: false, repositories: []};
 let drawerReturnFocus = null;
+let repositoryBrowserReturnFocus = null;
+let repositoryBrowserFilter = 'attention';
+let repositoryBrowserQuery = '';
+let repositoryBrowserPage = 1;
+const repositoryBrowserPageSize = 25;
 
 function toast(message, kind = 'error') {
   const item = document.createElement('div');
@@ -80,6 +85,102 @@ function adoptionMeta(repository = {}) {
   return states[repository.status] || states.pending;
 }
 
+function repositoryRecords() {
+  const byRepository = Object.fromEntries(
+    (adoptionData.repositories || []).map(repository => [repository.repository, repository]),
+  );
+  return [...(githubData.repositories || [])].map(name =>
+    byRepository[name] || {repository: name, status: 'pending', examples: []});
+}
+
+function repositoryGroup(repository) {
+  if (['needs_migration', 'mixed', 'error'].includes(repository.status)) return 'attention';
+  if (repository.status === 'using_easy_runners') return 'migrated';
+  return 'unverified';
+}
+
+function orderedRepositories(repositories) {
+  const priority = {attention: 0, unverified: 1, migrated: 2};
+  return [...repositories].sort((left, right) =>
+    priority[repositoryGroup(left)] - priority[repositoryGroup(right)]
+    || left.repository.localeCompare(right.repository));
+}
+
+function repositoryRow(repository) {
+  const [label, className, icon, description] = adoptionMeta(repository);
+  return `<button class="repository-status-row" type="button" data-repository="${esc(repository.repository)}" title="${esc(description)}. Click for details.">
+    <span class="repository-status-mark ${esc(className)}" aria-hidden="true">${esc(icon)}</span>
+    <span class="repository-status-copy"><strong>${esc(repository.repository)}</strong><small>${esc(description)}</small></span>
+    <span class="badge ${esc(className)}">${esc(label)}</span>
+    <svg class="repository-chevron" aria-hidden="true" viewBox="0 0 24 24"><path d="m9 18 6-6-6-6"/></svg>
+  </button>`;
+}
+
+function repositoryCounts(records) {
+  return records.reduce((counts, repository) => {
+    counts[repositoryGroup(repository)] += 1;
+    return counts;
+  }, {attention: 0, migrated: 0, unverified: 0});
+}
+
+function repositoryScanSummary() {
+  const total = Number(adoptionData.repository_count_total ?? githubData.repositories?.length) || 0;
+  const scanned = Number(adoptionData.repository_count_scanned) || 0;
+  const scan = adoptionData.scan || {};
+  if (scan.scanning) {
+    const coverage = scanned < total ? `${scanned} of ${total} checked` : `All ${total} checked`;
+    return `${coverage} · scanning ${scan.completed || 0}/${scan.total || 0}`;
+  }
+  if (scan.error) return `${scanned} of ${total} scanned · scan paused`;
+  if (!adoptionData.scanned_at) return 'Waiting for the first scan';
+  return scanned < total ? `${scanned} of ${total} scanned` : `${total} repositories checked`;
+}
+
+function repositorySummaryFilters(counts) {
+  return `<div class="repository-summary" aria-label="Repository migration summary">
+    <button class="repository-summary-filter" type="button" data-repository-filter="attention"><strong>${counts.attention}</strong><span>Need attention</span></button>
+    <button class="repository-summary-filter" type="button" data-repository-filter="migrated"><strong>${counts.migrated}</strong><span>Migrated</span></button>
+    <button class="repository-summary-filter" type="button" data-repository-filter="unverified"><strong>${counts.unverified}</strong><span>Unverified</span></button>
+  </div>`;
+}
+
+function renderRepositoryBrowser() {
+  const browser = document.querySelector('#repository-browser');
+  if (!browser) return;
+  const allRecords = orderedRepositories(repositoryRecords());
+  const counts = repositoryCounts(allRecords);
+  const query = repositoryBrowserQuery.trim().toLowerCase();
+  const filtered = allRecords.filter(repository =>
+    (repositoryBrowserFilter === 'all' || repositoryGroup(repository) === repositoryBrowserFilter)
+    && (!query || repository.repository.toLowerCase().includes(query)));
+  const pageCount = Math.max(1, Math.ceil(filtered.length / repositoryBrowserPageSize));
+  repositoryBrowserPage = Math.min(repositoryBrowserPage, pageCount);
+  const start = (repositoryBrowserPage - 1) * repositoryBrowserPageSize;
+  const page = filtered.slice(start, start + repositoryBrowserPageSize);
+  document.querySelector('#repository-browser-count').textContent = `${allRecords.length} repositories`;
+  const progress = document.querySelector('#repository-browser-progress');
+  progress.textContent = repositoryScanSummary();
+  progress.title = adoptionData.scan?.error || '';
+  document.querySelector('#repository-browser-filter').value = repositoryBrowserFilter;
+  document.querySelector('#repository-browser-list').innerHTML = page.length
+    ? page.map(repositoryRow).join('')
+    : '<p class="empty-message">No repositories match this filter.</p>';
+  document.querySelector('#repository-page-summary').textContent = filtered.length
+    ? `${start + 1}–${Math.min(start + repositoryBrowserPageSize, filtered.length)} of ${filtered.length}`
+    : '0 repositories';
+  document.querySelector('#repository-page-previous').disabled = repositoryBrowserPage <= 1;
+  document.querySelector('#repository-page-next').disabled = repositoryBrowserPage >= pageCount;
+  document.querySelector('#repository-browser-summary').innerHTML = repositorySummaryFilters(counts);
+  const manage = document.querySelector('#repository-browser-manage');
+  manage.hidden = !githubData.configure_url;
+  if (githubData.configure_url) manage.href = githubData.configure_url;
+  browser.querySelectorAll('.refresh-adoption').forEach(button => {
+    button.disabled = Boolean(adoptionData.scan?.scanning);
+    button.textContent = adoptionData.scan?.scanning ? 'Scanning…' : 'Scan now';
+  });
+  bindRepositoryControls(browser);
+}
+
 function renderRepositoryAccess(github, adoption) {
   githubData = github || githubData;
   adoptionData = adoption || {repositories: [], replacements: {}};
@@ -93,49 +194,29 @@ function renderRepositoryAccess(github, adoption) {
     ? '<p class="access-warning">This App can access all repositories. Restrict the installation on GitHub if needed.</p>'
     : '';
   const repositoryErrors = [githubData.metadata_error, githubData.repositories_error].filter(Boolean);
-  const repositories = [...(githubData.repositories || [])].sort((left, right) => left.localeCompare(right));
-  const byRepository = Object.fromEntries(
-    (adoptionData.repositories || []).map(repository => [repository.repository, repository]),
-  );
-  const needsMigration = Object.values(byRepository).filter(repository =>
-    ['needs_migration', 'mixed'].includes(repository.status));
-  const migrated = Object.values(byRepository).filter(repository => repository.status === 'using_easy_runners');
-  let summary = 'Not scanned';
-  let summaryClass = '';
-  if (needsMigration.length) {
-    summary = `${needsMigration.length} to update`;
-    summaryClass = 'warning';
-  } else if (repositories.length && migrated.length === repositories.length) {
-    summary = 'All migrated';
-    summaryClass = 'online';
-  } else if (adoptionData.scanned_at) {
-    summary = 'Scan complete';
-  }
-  const repositoryList = repositories.length
-    ? `<div class="repository-status-list">${repositories.map(name => {
-      const repository = byRepository[name] || {repository: name, status: 'pending'};
-      const [label, className, icon, description] = adoptionMeta(repository);
-      return `<button class="repository-status-row" type="button" data-repository="${esc(name)}" title="${esc(description)}. Click for details.">
-        <span class="repository-status-mark ${esc(className)}" aria-hidden="true">${esc(icon)}</span>
-        <span class="repository-status-copy"><strong>${esc(name)}</strong><small>${esc(description)}</small></span>
-        <span class="badge ${esc(className)}">${esc(label)}</span>
-        <svg class="repository-chevron" aria-hidden="true" viewBox="0 0 24 24"><path d="m9 18 6-6-6-6"/></svg>
-      </button>`;
-    }).join('')}</div>`
+  const records = orderedRepositories(repositoryRecords());
+  const counts = repositoryCounts(records);
+  const attention = records.filter(repository => repositoryGroup(repository) === 'attention');
+  const inline = (attention.length ? attention : records).slice(0, attention.length ? 6 : 3);
+  const listTitle = attention.length ? 'Needs attention' : 'Repository status';
+  const repositoryList = records.length
+    ? `<div class="repository-inline-heading"><span>${esc(listTitle)}</span><small>${esc(repositoryScanSummary())}</small></div><div class="repository-status-list">${inline.map(repositoryRow).join('')}</div>`
     : `<p class="empty-message">${githubData.repository_bound
       ? esc(repositoryErrors.length ? repositoryErrors.join(' · ') : 'No repositories are available to this installation.')
       : 'No installation repositories were found.'}</p>`;
   const configure = githubData.configure_url
-    ? `<a href="${esc(githubData.configure_url)}" target="_blank" rel="noopener">Manage repository access on GitHub</a>`
+    ? `<a href="${esc(githubData.configure_url)}" target="_blank" rel="noopener">Manage access on GitHub</a>`
     : '';
   target.innerHTML = `${accessWarning}<section class="repository-access-section" aria-labelledby="repository-access-heading">
     <div class="repository-access-header">
-      <div><h3 id="repository-access-heading">Repositories</h3><p>Click a repository to check or migrate its workflows.</p></div>
-      <div class="actions"><span class="badge ${summaryClass}">${esc(summary)}</span><button id="refresh-adoption" class="secondary compact" type="button">Scan now</button></div>
+      <div><h3 id="repository-access-heading">Repositories</h3><p>Workflow migration across this installation.</p></div>
+      <button class="secondary compact refresh-adoption" type="button" ${adoptionData.scan?.scanning ? 'disabled' : ''}>${adoptionData.scan?.scanning ? 'Scanning…' : 'Scan now'}</button>
     </div>
+    ${repositorySummaryFilters(counts)}
     ${repositoryList}
-    ${configure ? `<div class="repository-access-footer">${configure}</div>` : ''}
+    <div class="repository-access-footer"><button id="view-all-repositories" class="ghost compact" type="button">View all ${records.length} repositories</button>${configure}</div>
   </section>`;
+  renderRepositoryBrowser();
 }
 
 function updateMigrationReplacement() {
@@ -151,7 +232,7 @@ function updateMigrationReplacement() {
 
 function openMigrationDrawer(repositoryName, trigger = null) {
   const drawer = document.querySelector('#migration-drawer');
-  const repository = (adoptionData.repositories || []).find(item => item.repository === repositoryName)
+  const repository = repositoryRecords().find(item => item.repository === repositoryName)
     || {repository: repositoryName, status: 'pending', examples: []};
   const [label, className, , description] = adoptionMeta(repository);
   drawerReturnFocus = trigger || document.activeElement;
@@ -161,6 +242,9 @@ function openMigrationDrawer(repositoryName, trigger = null) {
   status.textContent = label;
   status.className = `badge ${className}`;
   document.querySelector('#migration-summary').textContent = description;
+  document.querySelector('#migration-checked').textContent = repository.scanned_at
+    ? `Last checked ${new Date(repository.scanned_at).toLocaleString()}`
+    : 'Not checked yet';
   const examples = repository.examples || [];
   document.querySelector('#migration-examples').innerHTML = examples.length
     ? `<div class="migration-example-heading"><h3>Detected jobs</h3><span>${examples.length} shown</span></div>${examples.map(example => `<article class="migration-example">
@@ -177,7 +261,7 @@ function openMigrationDrawer(repositoryName, trigger = null) {
   }
   updateMigrationReplacement();
   drawer.hidden = false;
-  document.body.classList.add('drawer-open');
+  updateModalLock();
   document.querySelector('#close-migration').focus();
 }
 
@@ -186,12 +270,69 @@ function closeMigrationDrawer() {
   if (drawer.hidden) return;
   const repository = drawer.dataset.repository;
   drawer.hidden = true;
-  document.body.classList.remove('drawer-open');
-  const currentTrigger = [...document.querySelectorAll('.repository-status-row')]
+  updateModalLock();
+  const browser = document.querySelector('#repository-browser');
+  const triggerRoot = browser.hidden ? document : browser;
+  const currentTrigger = [...triggerRoot.querySelectorAll('.repository-status-row')]
     .find(button => button.dataset.repository === repository);
   const focusTarget = drawerReturnFocus?.isConnected ? drawerReturnFocus : currentTrigger;
   drawerReturnFocus = null;
   window.requestAnimationFrame(() => focusTarget?.focus?.());
+}
+
+function updateModalLock() {
+  const browserOpen = !document.querySelector('#repository-browser')?.hidden;
+  const drawerOpen = !document.querySelector('#migration-drawer')?.hidden;
+  document.body.classList.toggle('drawer-open', browserOpen || drawerOpen);
+}
+
+function openRepositoryBrowser(filter = 'attention', trigger = null) {
+  const browser = document.querySelector('#repository-browser');
+  repositoryBrowserReturnFocus = trigger || document.activeElement;
+  repositoryBrowserFilter = filter;
+  repositoryBrowserPage = 1;
+  repositoryBrowserQuery = '';
+  document.querySelector('#repository-browser-search').value = '';
+  renderRepositoryBrowser();
+  browser.hidden = false;
+  updateModalLock();
+  document.querySelector('#repository-browser-search').focus();
+}
+
+function closeRepositoryBrowser() {
+  const browser = document.querySelector('#repository-browser');
+  if (browser.hidden) return;
+  browser.hidden = true;
+  updateModalLock();
+  const focusTarget = repositoryBrowserReturnFocus?.isConnected
+    ? repositoryBrowserReturnFocus
+    : document.querySelector('#view-all-repositories');
+  repositoryBrowserReturnFocus = null;
+  window.requestAnimationFrame(() => focusTarget?.focus?.());
+}
+
+function bindRepositoryControls(root = document) {
+  root.querySelectorAll('.repository-status-row').forEach(button => {
+    button.onclick = () => openMigrationDrawer(button.dataset.repository, button);
+  });
+  root.querySelectorAll('.repository-summary-filter').forEach(button => {
+    button.onclick = () => {
+      const browser = document.querySelector('#repository-browser');
+      if (browser.hidden) {
+        openRepositoryBrowser(button.dataset.repositoryFilter, button);
+      } else {
+        const filter = button.dataset.repositoryFilter;
+        repositoryBrowserFilter = filter;
+        repositoryBrowserPage = 1;
+        renderRepositoryBrowser();
+        window.requestAnimationFrame(() => browser.querySelector(
+          `.repository-summary-filter[data-repository-filter="${filter}"]`,
+        )?.focus());
+      }
+    };
+  });
+  const viewAll = root.querySelector('#view-all-repositories');
+  if (viewAll) viewAll.onclick = () => openRepositoryBrowser('all', viewAll);
 }
 
 function renderNotifications(notifications) {
@@ -575,21 +716,21 @@ function bindDynamic() {
       await action(() => navigator.clipboard.writeText(content), 'Replacement runs-on line copied.');
     };
   });
-  document.querySelectorAll('.repository-status-row').forEach(button => {
-    button.onclick = () => openMigrationDrawer(button.dataset.repository, button);
+  bindRepositoryControls(document);
+  document.querySelectorAll('.refresh-adoption').forEach(button => {
+    button.onclick = async () => {
+      button.disabled = true;
+      const result = await action(() => json('/api/repositories/adoption?refresh=true'));
+      if (result) {
+        dashboardCache.adoption = result;
+        renderRepositoryAccess(githubData, result);
+        bindDynamic();
+        toast(result.scan?.scanning ? 'Repository scan started.' : 'Repository scan refreshed.', 'success');
+      } else {
+        button.disabled = false;
+      }
+    };
   });
-  const adoptionRefresh = document.querySelector('#refresh-adoption');
-  if (adoptionRefresh) adoptionRefresh.onclick = async event => {
-    event.currentTarget.disabled = true;
-    const result = await action(() => json('/api/repositories/adoption?refresh=true'), 'Repository scan completed.');
-    if (result) {
-      dashboardCache.adoption = result;
-      renderRepositoryAccess(githubData, result);
-      bindDynamic();
-    }
-    const current = document.querySelector('#refresh-adoption');
-    if (current) current.disabled = false;
-  };
 }
 
 document.querySelector('#reconcile')?.addEventListener('click', async () => {
@@ -712,15 +853,41 @@ document.querySelector('#copy-migration-runs-on')?.addEventListener('click', asy
 document.querySelectorAll('[data-close-migration]').forEach(button => {
   button.addEventListener('click', closeMigrationDrawer);
 });
+document.querySelectorAll('[data-close-repository-browser]').forEach(button => {
+  button.addEventListener('click', closeRepositoryBrowser);
+});
+document.querySelector('#repository-browser-search')?.addEventListener('input', event => {
+  repositoryBrowserQuery = event.target.value;
+  repositoryBrowserPage = 1;
+  renderRepositoryBrowser();
+});
+document.querySelector('#repository-browser-filter')?.addEventListener('change', event => {
+  repositoryBrowserFilter = event.target.value;
+  repositoryBrowserPage = 1;
+  renderRepositoryBrowser();
+});
+document.querySelector('#repository-page-previous')?.addEventListener('click', () => {
+  repositoryBrowserPage = Math.max(1, repositoryBrowserPage - 1);
+  renderRepositoryBrowser();
+});
+document.querySelector('#repository-page-next')?.addEventListener('click', () => {
+  repositoryBrowserPage += 1;
+  renderRepositoryBrowser();
+});
 document.addEventListener('keydown', event => {
   const drawer = document.querySelector('#migration-drawer');
-  if (drawer.hidden) return;
+  const browser = document.querySelector('#repository-browser');
+  if (drawer.hidden && browser.hidden) return;
   if (event.key === 'Escape') {
-    closeMigrationDrawer();
+    if (!drawer.hidden) closeMigrationDrawer();
+    else closeRepositoryBrowser();
     return;
   }
   if (event.key !== 'Tab') return;
-  const focusable = [...drawer.querySelectorAll('button:not(:disabled), a[href], select:not(:disabled)')]
+  const activeModal = !drawer.hidden
+    ? drawer.querySelector('[role="dialog"]')
+    : browser.querySelector('[role="dialog"]');
+  const focusable = [...activeModal.querySelectorAll('button:not(:disabled), a[href], input:not(:disabled), select:not(:disabled)')]
     .filter(element => element.getClientRects().length);
   const first = focusable[0];
   const last = focusable.at(-1);

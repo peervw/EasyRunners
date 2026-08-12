@@ -85,6 +85,8 @@ def test_login_dashboard_csrf_and_api_token(client) -> None:
     assert 'aria-label="Main navigation"' in dashboard.text
     assert "Runner pools" in dashboard.text
     assert "GitHub integration" in dashboard.text
+    assert 'id="repository-browser"' in dashboard.text
+    assert 'placeholder="Search repositories…"' in dashboard.text
     assert 'id="migration-drawer"' in dashboard.text
     assert 'class="card adoption-card"' not in dashboard.text
     assert 'data-activity-tab="diagnostics"' in dashboard.text
@@ -350,9 +352,10 @@ def test_repository_adoption_and_notification_endpoints(client, monkeypatch) -> 
     )
     app.state.github_store.save_installation(2)
 
-    async def adoption(pools, *, refresh=False):
+    async def adoption(pools, *, refresh=False, wait=True):
         assert "default" in pools
         assert refresh is True
+        assert wait is False
         return {
             "repositories": [
                 {"repository": "peer/repo", "status": "needs_migration"}

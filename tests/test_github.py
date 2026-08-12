@@ -1,3 +1,4 @@
+import asyncio
 from pathlib import Path
 
 import httpx
@@ -520,6 +521,10 @@ async def test_repository_adoption_finds_hosted_jobs_and_exact_replacement(
         == ".github/workflows/ci.yml"
     )
     assert by_repository["peer/self-hosted"]["status"] == "using_easy_runners"
+    assert adoption["repository_count_total"] == 2
+    assert adoption["repository_count_scanned"] == 2
+    assert adoption["scan"]["scanning"] is False
+    assert adoption["scan"]["completed"] == 2
     assert adoption["recommended_pool"] == "ci"
     assert adoption["recommended_runs_on"] == "runs-on: [self-hosted, linux, ci]"
     assert adoption["replacements"]["docker"]["runs_on"].endswith("linux, docker]")
@@ -528,5 +533,118 @@ async def test_repository_adoption_finds_hosted_jobs_and_exact_replacement(
     )
     assert cached["recommended_pool"] == "safe"
     assert cached["recommended_runs_on"] == "runs-on: [self-hosted, linux, safe]"
+    await client.close()
+    database.close()
+
+
+@pytest.mark.asyncio
+async def test_repository_adoption_runs_in_background_and_reports_progress(
+    tmp_path, monkeypatch
+) -> None:
+    client, _, database = make_stack(
+        tmp_path,
+        lambda request: httpx.Response(500, request=request),
+    )
+    repositories = ["peer/one", "peer/two", "peer/three"]
+    release = asyncio.Event()
+    started = asyncio.Event()
+
+    async def list_repositories(*, refresh=False):
+        return repositories
+
+    async def scan(repository):
+        started.set()
+        await release.wait()
+        return {
+            "repository": repository,
+            "status": "using_easy_runners",
+            "hosted_jobs": 0,
+            "self_hosted_jobs": 1,
+            "examples": [],
+            "error": None,
+        }
+
+    monkeypatch.setattr(client, "list_repositories", list_repositories)
+    monkeypatch.setattr(client, "_repository_adoption", scan)
+    client.settings.poll_concurrency = 2
+    pools = {"ci": RunnerPoolConfig(labels=["ci"], docker_mode=DockerMode.NONE)}
+
+    initial = await client.repository_adoption(pools, wait=False)
+    assert initial["scan"]["scanning"] is True
+    assert initial["scan"]["total"] == 3
+    await started.wait()
+    progress = await client.repository_adoption(pools, wait=False)
+    assert progress["repository_count_scanned"] == 0
+
+    release.set()
+    assert client._adoption_task
+    await client._adoption_task
+    completed = await client.repository_adoption(pools, wait=False)
+    assert completed["scan"]["scanning"] is False
+    assert completed["repository_count_scanned"] == 3
+    assert completed["scan"]["completed"] == 3
+    await client.close()
+    database.close()
+
+
+@pytest.mark.asyncio
+async def test_repository_adoption_batches_and_prioritizes_unscanned_repositories(
+    tmp_path, monkeypatch
+) -> None:
+    client, _, database = make_stack(
+        tmp_path,
+        lambda request: httpx.Response(500, request=request),
+    )
+    repositories = [
+        "peer/new",
+        "peer/unverified",
+        "peer/problem",
+        "peer/migrated",
+    ]
+    client._adoption_results = {
+        "peer/unverified": {
+            "repository": "peer/unverified",
+            "status": "no_recent_jobs",
+            "scanned_at": "2026-08-01T00:00:00+00:00",
+        },
+        "peer/problem": {
+            "repository": "peer/problem",
+            "status": "needs_migration",
+            "scanned_at": "2026-08-01T00:00:00+00:00",
+        },
+        "peer/migrated": {
+            "repository": "peer/migrated",
+            "status": "using_easy_runners",
+            "scanned_at": "2026-08-01T00:00:00+00:00",
+        },
+    }
+    scanned: list[str] = []
+
+    async def list_repositories(*, refresh=False):
+        return repositories
+
+    async def scan(repository):
+        scanned.append(repository)
+        return {
+            "repository": repository,
+            "status": "using_easy_runners",
+            "hosted_jobs": 0,
+            "self_hosted_jobs": 1,
+            "examples": [],
+            "error": None,
+        }
+
+    monkeypatch.setattr(client, "list_repositories", list_repositories)
+    monkeypatch.setattr(client, "_repository_adoption", scan)
+    client.settings.poll_concurrency = 1
+    client.settings.adoption_max_repositories = 2
+    pools = {"ci": RunnerPoolConfig(labels=["ci"], docker_mode=DockerMode.NONE)}
+
+    result = await client.repository_adoption(pools, refresh=True)
+    assert scanned == ["peer/new", "peer/unverified"]
+    assert result["repository_count_total"] == 4
+    assert result["repository_count_scanned"] == 4
+    assert result["scan"]["completed"] == 2
+    assert result["scan"]["total"] == 2
     await client.close()
     database.close()

@@ -93,8 +93,10 @@ shows it as busy, and removes its container and workspace when the job finishes.
 **Workflow labels** card shows the exact line for every configured pool and diagnoses jobs whose
 labels do not match a pool. Under **Settings → GitHub integration**, every selected repository has a
 migration status. A green check means its recent jobs use EasyRunners; click any repository to see
-hosted-runner jobs and copy the exact replacement for a pool. The scan uses the existing Actions read
-permission and caches a bounded sample for ten minutes; it does not read or modify workflow files.
+hosted-runner jobs and copy the exact replacement for a pool. Large installations stay compact with
+status filters, search, and paginated results. The scan runs in the background with bounded GitHub
+concurrency, retains the latest result for each repository, and caches a bounded job sample for ten
+minutes; it does not read or modify workflow files.
 
 That's it—future matching jobs scale up and clean themselves up automatically.
 
@@ -373,8 +375,8 @@ Endpoints:
 - `GET /health` — intentionally minimal unauthenticated liveness
 - `GET /api/status`, `/api/runners`, `/api/pools`, `/api/history`, `/api/usage`
 - `GET /api/readiness` and `/api/version`
-- `GET /api/repositories/adoption` for cached workflow-label migration status; append
-  `?refresh=true` for an immediate scan
+- `GET /api/repositories/adoption` for cached workflow-label migration status and background scan
+  progress; append `?refresh=true` to start a new scan
 - `GET /api/notifications` and `POST /api/notifications/test`
 - `GET /api/jobs` for queued and in-progress workflow jobs
 - `GET /api/diagnostics` and `/api/diagnostics/{name}` for retained runner archives; `DELETE

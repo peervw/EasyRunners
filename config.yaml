@@ -3,6 +3,11 @@ manager:
   queue_poll_interval: 60
   full_poll_interval: 300
   poll_concurrency: 5
+  # Workflow migration scans run in the background. This limits repositories
+  # per pass; new and unverified repositories are checked first.
+  adoption_scan_interval: 600
+  adoption_runs_per_repo: 5
+  adoption_max_repositories: 100
   history_limit: 500
   runner_log_capture_enabled: true
   runner_log_cleanup_enabled: true

@@ -50,6 +50,7 @@ class Settings(BaseSettings):
     webhook_enabled: bool = True
     adoption_scan_interval: int = 600
     adoption_runs_per_repo: int = 5
+    # Repositories checked per background pass; later passes prioritize remaining work.
     adoption_max_repositories: int = 100
     host_resource_cache_seconds: int = 15
 

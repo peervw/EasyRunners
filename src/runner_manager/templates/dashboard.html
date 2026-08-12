@@ -345,6 +345,47 @@
         </main>
       </div>
     </div>
+    <div id="repository-browser" class="repository-browser-shell" hidden>
+      <button class="repository-browser-backdrop" type="button" data-close-repository-browser aria-label="Close repository browser"></button>
+      <section class="repository-browser-dialog" role="dialog" aria-modal="true" aria-labelledby="repository-browser-title">
+        <div class="drawer-header">
+          <div>
+            <span class="drawer-eyebrow">GitHub integration</span>
+            <h2 id="repository-browser-title">Repositories</h2>
+            <p><span id="repository-browser-count">0 repositories</span> · <span id="repository-browser-progress">Waiting for scan</span></p>
+          </div>
+          <div class="actions">
+            <button class="secondary compact refresh-adoption" type="button">Scan now</button>
+            <button id="close-repository-browser" class="ghost drawer-close" type="button" data-close-repository-browser aria-label="Close repository browser">×</button>
+          </div>
+        </div>
+        <div class="repository-browser-content">
+          <div id="repository-browser-summary"></div>
+          <div class="repository-browser-toolbar">
+            <label class="repository-search">Search
+              <input id="repository-browser-search" type="search" placeholder="Search repositories…" autocomplete="off">
+            </label>
+            <label>Status
+              <select id="repository-browser-filter">
+                <option value="attention">Needs attention</option>
+                <option value="migrated">Migrated</option>
+                <option value="unverified">Unverified</option>
+                <option value="all">All repositories</option>
+              </select>
+            </label>
+          </div>
+          <div id="repository-browser-list" class="repository-status-list repository-browser-list"></div>
+        </div>
+        <div class="repository-browser-footer">
+          <a id="repository-browser-manage" href="#" target="_blank" rel="noopener">Manage access on GitHub</a>
+          <div class="repository-pagination">
+            <span id="repository-page-summary">0 repositories</span>
+            <button id="repository-page-previous" class="secondary compact" type="button">Previous</button>
+            <button id="repository-page-next" class="secondary compact" type="button">Next</button>
+          </div>
+        </div>
+      </section>
+    </div>
     <div id="migration-drawer" class="drawer-shell" hidden>
       <button class="drawer-backdrop" type="button" data-close-migration aria-label="Close migration details"></button>
       <aside class="migration-drawer" role="dialog" aria-modal="true" aria-labelledby="migration-title">
@@ -358,7 +399,7 @@
         <div class="drawer-content">
           <div class="migration-status-line">
             <span id="migration-status" class="badge">Not scanned</span>
-            <p id="migration-summary">Select a repository to see its workflow status.</p>
+            <div><p id="migration-summary">Select a repository to see its workflow status.</p><small id="migration-checked"></small></div>
           </div>
           <div id="migration-examples" class="migration-examples"></div>
           <div class="migration-replacement">
