@@ -6,6 +6,7 @@ import json
 import logging
 from collections.abc import AsyncIterator
 from contextlib import asynccontextmanager
+from importlib.metadata import PackageNotFoundError, version
 from pathlib import Path
 from typing import Any
 
@@ -22,6 +23,7 @@ from runner_manager.demand import DemandTracker
 from runner_manager.docker import DockerRunnerManager
 from runner_manager.github import GitHubClient, GitHubConnectionStore
 from runner_manager.models import DiagnosticSettings, RunnerPoolConfig
+from runner_manager.notifications import NotificationManager
 from runner_manager.scheduler import Scheduler
 
 
@@ -80,7 +82,8 @@ def create_app(settings: Settings | None = None, *, start_scheduler: bool = True
         github = GitHubClient(configured, store)
         docker = DockerRunnerManager(configured)
         demand = DemandTracker(configured.runner_pools, database)
-        scheduler = Scheduler(configured, github, docker, demand)
+        notifications = NotificationManager(configured)
+        scheduler = Scheduler(configured, github, docker, demand, notifications)
         app.state.settings = configured
         app.state.database = database
         app.state.auth = auth
@@ -88,6 +91,7 @@ def create_app(settings: Settings | None = None, *, start_scheduler: bool = True
         app.state.github = github
         app.state.docker = docker
         app.state.demand = demand
+        app.state.notifications = notifications
         app.state.scheduler = scheduler
         if start_scheduler:
             scheduler.start()
@@ -101,12 +105,17 @@ def create_app(settings: Settings | None = None, *, start_scheduler: bool = True
             if tasks:
                 await asyncio.gather(*tasks, return_exceptions=True)
             await github.close()
+            await notifications.close()
             await docker.close()
             database.close()
 
+    try:
+        manager_version = version("easy-runners")
+    except PackageNotFoundError:
+        manager_version = "0.2.0-dev"
     app = FastAPI(
         title="EasyRunners",
-        version="0.2.0",
+        version=manager_version,
         docs_url=None,
         redoc_url=None,
         openapi_url=None,

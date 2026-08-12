@@ -8,7 +8,27 @@ manager:
   runner_log_cleanup_enabled: true
   runner_log_retention_days: 7
 
+  # Optional generic JSON webhook for operational failures. Prefer setting the
+  # URL and signing secret through environment variables instead of this file.
+  notification_stuck_job_seconds: 900
+  notification_cooldown_seconds: 900
+
 runner_pools:
+  # Recommended for tests, linting, and builds that do not invoke Docker.
+  ci:
+    labels: [self-hosted, linux, ci]
+    min: 0
+    max: 5
+    priority: 20
+    cpu: 4
+    memory: 8g
+    pids_limit: 1024
+    idle_timeout: 60
+    job_timeout: 3600
+    max_lifetime: 3900
+    docker_mode: none
+
+  # Use only for workflows that actually need Docker builds or containers.
   default:
     labels: [self-hosted, linux, docker]
     min: 0
@@ -22,7 +42,7 @@ runner_pools:
     max_lifetime: 3900
     docker_mode: socket
 
-  # Rust uses the same universal image. A separate pool keeps non-Docker jobs away from the socket.
+  # Rust uses the same universal image and stays away from the Docker socket.
   rust:
     labels: [self-hosted, linux, rust]
     min: 0

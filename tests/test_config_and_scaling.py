@@ -54,6 +54,21 @@ def test_settings_reject_identical_pool_label_sets(tmp_path) -> None:
         )
 
 
+def test_notification_webhook_requires_https_in_production(tmp_path) -> None:
+    with pytest.raises(ValidationError, match="must use HTTPS"):
+        Settings(
+            public_url="https://runners.example.com",
+            config_path=tmp_path / "none",
+            notification_webhook_url="http://alerts.example.com/hook",
+        )
+    settings = Settings(
+        public_url="https://runners.example.com",
+        config_path=tmp_path / "none",
+        notification_webhook_url="https://alerts.example.com/hook",
+    )
+    assert settings.notification_webhook_url is not None
+
+
 def test_match_pool_prefers_fewest_surplus_then_priority() -> None:
     pools = {
         "wide": RunnerPoolConfig(labels=["docker", "deploy", "gpu"], priority=100),

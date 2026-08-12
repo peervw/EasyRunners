@@ -6,7 +6,12 @@ import pytest
 from runner_manager.config import Settings
 from runner_manager.database import Database
 from runner_manager.github import GitHubClient, GitHubConnectionStore, GitHubRateLimitError
-from runner_manager.models import GitHubConnectRequest, GitHubSetupRequest, RunnerPoolConfig
+from runner_manager.models import (
+    DockerMode,
+    GitHubConnectRequest,
+    GitHubSetupRequest,
+    RunnerPoolConfig,
+)
 
 
 def make_stack(tmp_path: Path, handler) -> tuple[GitHubClient, GitHubConnectionStore, Database]:
@@ -441,5 +446,75 @@ async def test_server_errors_are_retried_with_backoff(tmp_path, monkeypatch) -> 
     monkeypatch.setattr("runner_manager.github.asyncio.sleep", no_sleep)
     assert await client.list_repositories(refresh=True) == ["peer/repo"]
     assert attempts == 3
+    await client.close()
+    database.close()
+
+
+@pytest.mark.asyncio
+async def test_repository_adoption_finds_hosted_jobs_and_exact_replacement(
+    tmp_path, monkeypatch
+) -> None:
+    def handler(request: httpx.Request) -> httpx.Response:
+        path = request.url.path
+        if path == "/app/installations/99/access_tokens":
+            return httpx.Response(
+                201,
+                json={"token": "ghs", "expires_at": "2099-01-01T00:00:00Z"},
+            )
+        if path == "/installation/repositories":
+            return httpx.Response(
+                200,
+                json={
+                    "repositories": [
+                        {"full_name": "peer/hosted"},
+                        {"full_name": "peer/self-hosted"},
+                    ]
+                },
+            )
+        if path.endswith("/actions/runs"):
+            return httpx.Response(
+                200,
+                json={"workflow_runs": [{"id": 42, "name": "CI"}]},
+            )
+        if path.endswith("/actions/runs/42/jobs"):
+            label = "ubuntu-latest" if "/hosted/" in path else "self-hosted"
+            return httpx.Response(
+                200,
+                json={
+                    "jobs": [
+                        {
+                            "id": 7,
+                            "name": "checks",
+                            "labels": [label, "linux"],
+                            "html_url": "https://github.com/peer/repo/actions/runs/42/job/7",
+                        }
+                    ]
+                },
+            )
+        raise AssertionError(request.url)
+
+    client, store, database = make_stack(tmp_path, handler)
+    store.save_manifest_result(
+        GitHubSetupRequest(scope="repo", owner="peer"),
+        {"id": 12, "slug": "easy", "pem": "PRIVATE", "webhook_secret": "hook"},
+    )
+    store.save_installation(99)
+    monkeypatch.setattr(client.auth, "app_jwt", lambda *args: "jwt")
+    pools = {
+        "ci": RunnerPoolConfig(labels=["ci"], docker_mode=DockerMode.NONE),
+        "docker": RunnerPoolConfig(labels=["docker"], docker_mode=DockerMode.SOCKET),
+    }
+    adoption = await client.repository_adoption(pools)
+    by_repository = {item["repository"]: item for item in adoption["repositories"]}
+    assert by_repository["peer/hosted"]["status"] == "needs_migration"
+    assert by_repository["peer/self-hosted"]["status"] == "using_easy_runners"
+    assert adoption["recommended_pool"] == "ci"
+    assert adoption["recommended_runs_on"] == "runs-on: [self-hosted, linux, ci]"
+    assert adoption["replacements"]["docker"]["runs_on"].endswith("linux, docker]")
+    cached = await client.repository_adoption(
+        {"safe": RunnerPoolConfig(labels=["safe"], docker_mode=DockerMode.NONE)}
+    )
+    assert cached["recommended_pool"] == "safe"
+    assert cached["recommended_runs_on"] == "runs-on: [self-hosted, linux, safe]"
     await client.close()
     database.close()

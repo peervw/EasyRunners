@@ -18,9 +18,12 @@ from runner_manager.config import Settings
 from runner_manager.database import Database
 from runner_manager.metrics import GITHUB_API_FAILURES, GITHUB_RATE_LIMIT_REMAINING
 from runner_manager.models import (
+    ARCHITECTURE_LABELS,
+    DockerMode,
     GitHubConnectRequest,
     GitHubScope,
     GitHubSetupRequest,
+    RunnerPoolConfig,
     WorkflowJob,
 )
 
@@ -296,8 +299,9 @@ class GitHubClient:
         self._owns_client = client is None
         self.auth = GitHubAuth(settings, store, self.http)
         self._latest_runner: tuple[float, str | None] = (0.0, None)
-        self._latest_manager: tuple[float, str | None] = (0.0, None)
+        self._latest_manager: tuple[float, dict[str, Any] | None] = (0.0, None)
         self._repositories: tuple[float, list[str]] = (0.0, [])
+        self._adoption: tuple[float, dict[str, Any]] = (0.0, {})
         self._installation_metadata_at = 0.0
         self._rate_limited_until = 0.0
         self._rate_limit_remaining: int | None = None
@@ -310,6 +314,7 @@ class GitHubClient:
     def invalidate_connection_cache(self) -> None:
         self.auth.invalidate()
         self._repositories = (0.0, [])
+        self._adoption = (0.0, {})
         self._installation_metadata_at = 0.0
 
     def _headers(self, token: str) -> dict[str, str]:
@@ -688,6 +693,152 @@ class GitHubClient:
             self.store.update_repository_metadata(repositories_count=len(selected))
         return list(selected)
 
+    @staticmethod
+    def workflow_labels(pool: RunnerPoolConfig) -> list[str]:
+        labels = pool.effective_labels - ARCHITECTURE_LABELS
+        ordered = [label for label in ("self-hosted", "linux") if label in labels]
+        return ordered + sorted(labels - set(ordered))
+
+    @classmethod
+    def workflow_runs_on(cls, pool: RunnerPoolConfig) -> str:
+        return f"runs-on: [{', '.join(cls.workflow_labels(pool))}]"
+
+    @staticmethod
+    def _recommended_pool(pools: dict[str, RunnerPoolConfig]) -> str | None:
+        if "ci" in pools:
+            return "ci"
+        non_docker = sorted(
+            name for name, pool in pools.items() if pool.docker_mode == DockerMode.NONE
+        )
+        if non_docker:
+            return non_docker[0]
+        if "default" in pools:
+            return "default"
+        return sorted(pools)[0] if pools else None
+
+    @classmethod
+    def _adoption_pool_details(
+        cls, pools: dict[str, RunnerPoolConfig]
+    ) -> dict[str, Any]:
+        recommendation = cls._recommended_pool(pools)
+        replacements = {
+            name: {
+                "labels": cls.workflow_labels(pool),
+                "runs_on": cls.workflow_runs_on(pool),
+                "docker_mode": pool.docker_mode.value,
+            }
+            for name, pool in sorted(pools.items())
+        }
+        return {
+            "recommended_pool": recommendation,
+            "recommended_runs_on": (
+                replacements[recommendation]["runs_on"] if recommendation else None
+            ),
+            "replacements": replacements,
+        }
+
+    async def repository_adoption(
+        self,
+        pools: dict[str, RunnerPoolConfig],
+        *,
+        refresh: bool = False,
+    ) -> dict[str, Any]:
+        cached_at, cached = self._adoption
+        if (
+            not refresh
+            and cached_at
+            and time.monotonic() - cached_at < self.settings.adoption_scan_interval
+        ):
+            return {**cached, **self._adoption_pool_details(pools)}
+
+        repositories = (await self.list_repositories(refresh=refresh))[
+            : self.settings.adoption_max_repositories
+        ]
+        semaphore = asyncio.Semaphore(self.settings.poll_concurrency)
+
+        async def scan(repository: str) -> dict[str, Any]:
+            async with semaphore:
+                try:
+                    return await self._repository_adoption(repository)
+                except Exception as exc:
+                    log.warning(
+                        "github.adoption_scan_failed", repository=repository, error=str(exc)
+                    )
+                    return {
+                        "repository": repository,
+                        "status": "error",
+                        "hosted_jobs": 0,
+                        "self_hosted_jobs": 0,
+                        "examples": [],
+                        "error": str(exc),
+                    }
+
+        results = await asyncio.gather(*(scan(repository) for repository in repositories))
+        payload = {
+            "repositories": results,
+            "scanned_at": datetime.now(UTC).isoformat(),
+            "cached_for_seconds": self.settings.adoption_scan_interval,
+            **self._adoption_pool_details(pools),
+        }
+        self._adoption = (time.monotonic(), payload)
+        return dict(payload)
+
+    async def _repository_adoption(self, repository: str) -> dict[str, Any]:
+        body = await self.request(
+            "GET",
+            f"/repos/{repository}/actions/runs",
+            operation="adoption_workflow_runs",
+            params={"per_page": self.settings.adoption_runs_per_repo},
+        )
+        hosted = 0
+        self_hosted = 0
+        examples: list[dict[str, Any]] = []
+        for run in body.get("workflow_runs", []):
+            run_id = int(run["id"])
+            jobs = await self.request(
+                "GET",
+                f"/repos/{repository}/actions/runs/{run_id}/jobs",
+                operation="adoption_workflow_jobs",
+                params={"filter": "latest", "per_page": 100},
+            )
+            for job in jobs.get("jobs", []):
+                labels = sorted({str(label).lower() for label in job.get("labels") or []})
+                is_self_hosted = "self-hosted" in labels
+                is_hosted = any(
+                    label == "ubuntu-latest"
+                    or label.startswith(("ubuntu-", "windows-", "macos-"))
+                    for label in labels
+                )
+                if is_self_hosted:
+                    self_hosted += 1
+                if is_hosted:
+                    hosted += 1
+                    if len(examples) < 5:
+                        examples.append(
+                            {
+                                "workflow": str(run.get("name") or "Workflow"),
+                                "job": str(job.get("name") or "Job"),
+                                "labels": labels,
+                                "url": str(job.get("html_url") or run.get("html_url") or ""),
+                            }
+                        )
+        if hosted and self_hosted:
+            status = "mixed"
+        elif hosted:
+            status = "needs_migration"
+        elif self_hosted:
+            status = "using_easy_runners"
+        else:
+            status = "no_recent_jobs"
+        return {
+            "repository": repository,
+            "status": status,
+            "hosted_jobs": hosted,
+            "self_hosted_jobs": self_hosted,
+            "examples": examples,
+            "error": None,
+        }
+
     async def refresh_installation_metadata(self, *, refresh: bool = False) -> GitHubConnection:
         credentials = self.store.credentials(require_installation=False)
         if not credentials:
@@ -794,10 +945,10 @@ class GitHubClient:
         self._latest_runner = (time.monotonic(), version)
         return version
 
-    async def latest_manager_version(self) -> str | None:
-        cached_at, version = self._latest_manager
+    async def latest_manager_release(self) -> dict[str, Any] | None:
+        cached_at, release = self._latest_manager
         if time.monotonic() - cached_at < 3600:
-            return version
+            return dict(release) if release else None
         try:
             response = await self.http.get(
                 f"{self.settings.github_api_url}/repos/"
@@ -805,11 +956,23 @@ class GitHubClient:
                 headers={"Accept": "application/vnd.github+json", "User-Agent": "EasyRunners/0.1"},
             )
             response.raise_for_status()
-            version = str(response.json().get("tag_name", "")).removeprefix("v") or None
+            body = response.json()
+            tag = str(body.get("tag_name", ""))
+            release = {
+                "tag": tag,
+                "version": tag.removeprefix("v"),
+                "name": str(body.get("name") or tag),
+                "published_at": body.get("published_at"),
+                "url": body.get("html_url"),
+            }
         except Exception:
-            version = None
-        self._latest_manager = (time.monotonic(), version)
-        return version
+            release = None
+        self._latest_manager = (time.monotonic(), release)
+        return dict(release) if release else None
+
+    async def latest_manager_version(self) -> str | None:
+        release = await self.latest_manager_release()
+        return str(release["version"]) if release else None
 
 
 def _parse_time(value: str | None) -> datetime:

@@ -12,6 +12,10 @@ from there.
 - **Scale to zero:** a matching job starts a runner; the container disappears when the job ends.
 - **Fresh jobs:** every job gets a clean container filesystem and workspace.
 - **Multi-repository:** one installation can serve every trusted repository selected in GitHub.
+- **Migration guidance:** the dashboard finds recent jobs still using `ubuntu-latest` and shows the
+  exact replacement for the recommended pool.
+- **Resource guardrails:** see host CPU, memory, disk, and remaining runner slots before a queue
+  reaches the machine's limit.
 - **Batteries included:** one universal Linux image covers Docker, Python, Rust, and common build
   tooling; setup actions handle any other language or version.
 - **Small control plane:** no Kubernetes, external database, queue, or registry login required.
@@ -74,6 +78,9 @@ In each existing workflow job, replace its hosted runner line:
 # before
 runs-on: ubuntu-latest
 
+# Tests, linting, and builds that do not invoke Docker (recommended)
+runs-on: [self-hosted, linux, ci]
+
 # Docker jobs
 runs-on: [self-hosted, linux, docker]
 
@@ -83,8 +90,11 @@ runs-on: [self-hosted, linux, rust]
 
 Push the change. The dashboard shows the job as queued, creates a fresh runner for that repository,
 shows it as busy, and removes its container and workspace when the job finishes. The dashboard's
-**Workflow labels** card shows the exact line for every configured pool and diagnoses
-jobs whose labels do not match a pool.
+**Workflow labels** card shows the exact line for every configured pool and diagnoses jobs whose
+labels do not match a pool. **Workflow migration** scans a bounded sample of recent Actions jobs in
+each selected repository, highlights repositories still using a GitHub-hosted Ubuntu label, and
+copies the recommended replacement. It uses the existing Actions read permission and caches scans
+for ten minutes; it does not read or modify workflow files.
 
 That's it—future matching jobs scale up and clean themselves up automatically.
 
@@ -186,6 +196,15 @@ can also be edited in the dashboard or imported/exported as YAML. Dashboard over
 
 ```yaml
 runner_pools:
+  ci:
+    labels: [self-hosted, linux, ci]
+    min: 0
+    max: 5
+    priority: 20
+    cpu: 4
+    memory: 8g
+    docker_mode: none
+
   default:
     labels: [self-hosted, linux, docker]
     min: 0
@@ -226,8 +245,13 @@ sensitive pools a unique discriminator such as `deploy`.
 Use a pool with:
 
 ```yaml
+runs-on: [self-hosted, linux, ci] # no Docker socket
 runs-on: [self-hosted, linux, docker]
 ```
+
+The `ci` pool is the recommended default for ordinary tests, linting, compilation, and Rust work.
+It uses the same universal image without mounting the root-equivalent Docker socket. Choose the
+`docker` label only for jobs that actually run Docker or Compose. Both pools scale to zero.
 
 See [Python CI](examples/python-ci.yaml), [Rust CI](examples/rust-ci.yaml),
 [GHCR build](examples/docker-ghcr.yaml), and [deployment](examples/deploy.yaml) examples.
@@ -309,6 +333,30 @@ Runner containers are otherwise non-privileged, drop capabilities, set `no-new-p
 published ports, run as UID/GID 1001, and receive configurable CPU, memory, PID, job, and lifetime
 limits. Pool-defined host mounts deliberately weaken isolation and must be reviewed.
 
+## Operational visibility and failure webhooks
+
+The dashboard's host card reads Docker host CPU and memory totals plus free space on the persistent
+data filesystem. It subtracts the CPU and memory limits reserved by active runner containers and
+shows how many additional runners each pool can safely start within both its pool maximum and host
+limits. Disk pressure below ten percent free is highlighted. These are scheduling guardrails based
+on configured container limits, not a replacement for node-level utilization monitoring.
+
+To forward operational failures to Slack-compatible relays, ntfy adapters, incident systems, or
+your own service, configure a generic HTTPS webhook:
+
+```dotenv
+NOTIFICATION_WEBHOOK_URL=https://alerts.example.com/hooks/easy-runners
+NOTIFICATION_WEBHOOK_SECRET=replace-with-a-random-secret
+NOTIFICATION_STUCK_JOB_SECONDS=900
+NOTIFICATION_COOLDOWN_SECONDS=900
+```
+
+EasyRunners sends JSON events for jobs queued past the threshold, runner startup or registration
+failures, and unhealthy GitHub API connections. When a secret is set, the exact request body is
+signed in `X-EasyRunners-Signature: sha256=…`. Repeated alerts are throttled by event target, and a
+failed notification never blocks runner reconciliation. Configuration status and a **Send test**
+button are available under **Settings → Failure notifications**.
+
 ## Dashboard, API, and metrics
 
 All management data is authenticated. Browser mutations also require CSRF validation. Create
@@ -325,6 +373,9 @@ Endpoints:
 - `GET /health` — intentionally minimal unauthenticated liveness
 - `GET /api/status`, `/api/runners`, `/api/pools`, `/api/history`, `/api/usage`
 - `GET /api/readiness` and `/api/version`
+- `GET /api/repositories/adoption` for cached workflow-label migration status; append
+  `?refresh=true` for an immediate scan
+- `GET /api/notifications` and `POST /api/notifications/test`
 - `GET /api/jobs` for queued and in-progress workflow jobs
 - `GET /api/diagnostics` and `/api/diagnostics/{name}` for retained runner archives; `DELETE
   /api/diagnostics` clears them
@@ -351,9 +402,12 @@ modes and is stored in the browser.
 
 ## Updating
 
-The dashboard checks EasyRunners releases and compares the pinned runner version with GitHub's
-latest release. It deliberately does not update automatically because runner releases use a
-progressive rollout.
+The dashboard reads the latest tagged EasyRunners GitHub Release—including its tag, publication
+time, and direct release link—and compares it with the installed package version. It separately
+compares the pinned official runner version with GitHub's latest runner release. The check timestamp
+is shown so stale or missing release data is visible. EasyRunners deliberately does not redeploy
+itself because runner releases use a progressive rollout and production updates should remain
+reviewable.
 
 Update and rebuild from source:
 
@@ -368,6 +422,12 @@ every ephemeral container. To update it, change `RUNNER_VERSION`, `RUNNER_SHA256
 [actions/runner releases page](https://github.com/actions/runner/releases), then rebuild. GitHub uses
 a progressive rollout, so verify the expected version in the repository or organization's **Add new
 self-hosted runner** page before updating.
+
+Maintainers publish EasyRunners with Release Please. Conventional commits merged into `main` update
+a release PR; merging that PR creates a `vX.Y.Z` tag, changelog entry, and GitHub Release. The
+package version, lockfile root package version, and release manifest move together. Dependabot runs
+weekly for the `uv` Python lockfile and every immutable GitHub Actions pin, grouping related updates
+into reviewable pull requests.
 
 ## Backup and restore
 

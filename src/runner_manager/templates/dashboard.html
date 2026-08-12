@@ -103,6 +103,14 @@
               </article>
             </section>
 
+            <section class="card host-card" aria-labelledby="host-heading">
+              <div class="card-header">
+                <div><h2 id="host-heading">Host resources</h2><p>Capacity reserved by active EasyRunners containers.</p></div>
+                <span id="host-badge" class="badge">Loading</span>
+              </div>
+              <div id="host-resources" class="resource-grid"></div>
+            </section>
+
             <div class="overview-grid">
               <section class="card pools-card" aria-labelledby="pools-heading">
                 <div class="card-header">
@@ -128,6 +136,24 @@
                 </div>
               </aside>
             </div>
+
+            <section class="card adoption-card" aria-labelledby="adoption-heading">
+              <div class="card-header">
+                <div><h2 id="adoption-heading">Workflow migration</h2><p>Recent jobs still using GitHub-hosted runners.</p></div>
+                <div class="actions">
+                  <span id="adoption-badge" class="badge">Scanning</span>
+                  <button id="refresh-adoption" class="secondary compact" type="button">Scan now</button>
+                </div>
+              </div>
+              <div class="adoption-recommendation">
+                <span>Recommended replacement</span>
+                <div class="code-copy">
+                  <code id="adoption-runs-on">Connect GitHub to scan repositories</code>
+                  <button id="copy-adoption-runs-on" class="secondary compact" type="button">Copy</button>
+                </div>
+              </div>
+              <div id="repository-adoption" class="adoption-list"></div>
+            </section>
 
             <section class="card usage-card" aria-labelledby="usage-heading">
               <div class="card-header">
@@ -251,6 +277,21 @@
                   <button id="copy-update-command" class="secondary compact" type="button">Copy</button>
                 </div>
                 <div id="update-links" class="actions update-links"></div>
+              </div>
+            </section>
+
+            <section class="card settings-card notifications-card">
+              <div class="settings-row">
+                <div class="settings-copy"><h2>Failure notifications</h2><p>Send operational alerts to any HTTPS webhook.</p></div>
+                <span id="notification-badge" class="badge">Loading</span>
+              </div>
+              <div class="settings-body notification-settings">
+                <p id="notification-summary" class="help-text">Loading notification configuration.</p>
+                <div class="code-copy">
+                  <code>NOTIFICATION_WEBHOOK_URL=https://example.com/hooks/easy-runners</code>
+                  <button id="test-notification" class="secondary compact" type="button">Send test</button>
+                </div>
+                <p class="help-text">Set the URL and optional <code>NOTIFICATION_WEBHOOK_SECRET</code> in Compose or Dokploy, then redeploy. Alerts cover stuck jobs, runner startup failures, and unhealthy GitHub connections.</p>
               </div>
             </section>
 

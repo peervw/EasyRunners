@@ -4,6 +4,7 @@ import asyncio
 import hashlib
 import hmac
 import json
+import re
 import time
 from collections.abc import Coroutine
 from dataclasses import dataclass
@@ -35,6 +36,7 @@ from runner_manager.models import (
     TokenCreateRequest,
     TokenScope,
 )
+from runner_manager.notifications import NotificationManager
 from runner_manager.scheduler import Scheduler
 
 router = APIRouter()
@@ -65,6 +67,10 @@ def _github(request: Request) -> GitHubClient:
 
 def _store(request: Request) -> GitHubConnectionStore:
     return cast(GitHubConnectionStore, request.app.state.github_store)
+
+
+def _notifications(request: Request) -> NotificationManager:
+    return cast(NotificationManager, request.app.state.notifications)
 
 
 def require_auth(request: Request) -> AuthContext:
@@ -133,10 +139,8 @@ def _safe_next(value: str) -> str:
 
 
 def _version_parts(value: str) -> tuple[int, ...]:
-    try:
-        return tuple(int(part) for part in value.split("."))
-    except ValueError:
-        return ()
+    match = re.search(r"\d+(?:\.\d+)*", value)
+    return tuple(int(part) for part in match.group().split(".")) if match else ()
 
 
 def _diagnostic_files(request: Request) -> list[Path]:
@@ -312,6 +316,26 @@ async def api_pools(
     request: Request, _: Annotated[AuthContext, Depends(require_auth)]
 ) -> dict[str, Any]:
     return cast(dict[str, Any], (await _scheduler(request).status())["pools"])
+
+
+@router.get("/api/repositories/adoption")
+async def api_repository_adoption(
+    request: Request,
+    _: Annotated[AuthContext, Depends(require_auth)],
+    refresh: bool = False,
+) -> dict[str, Any]:
+    if not _store(request).credentials():
+        return {
+            "repositories": [],
+            "scanned_at": None,
+            "recommended_pool": None,
+            "recommended_runs_on": None,
+            "replacements": {},
+        }
+    return await _github(request).repository_adoption(
+        _scheduler(request).settings.runner_pools,
+        refresh=refresh,
+    )
 
 
 @router.get("/api/pools/config.yaml")
@@ -536,6 +560,15 @@ async def api_readiness(
                 else "Disabled; periodic polling repairs demand"
             ),
         },
+        "notifications": {
+            "ok": _notifications(request).configured,
+            "optional": True,
+            "detail": (
+                "Failure webhook configured"
+                if _notifications(request).configured
+                else "Optional failure webhook is not configured"
+            ),
+        },
     }
     required = [item for item in checks.values() if not item.get("optional")]
     return {"ready": all(bool(item["ok"]) for item in required), "checks": checks}
@@ -567,10 +600,11 @@ async def api_version(
     except PackageNotFoundError:
         manager_version = "0.2.0-dev"
     current = request.app.state.settings.runner_version
-    latest, latest_manager = await asyncio.gather(
+    latest, manager_release = await asyncio.gather(
         _github(request).latest_runner_version(),
-        _github(request).latest_manager_version(),
+        _github(request).latest_manager_release(),
     )
+    latest_manager = str(manager_release["version"]) if manager_release else None
     runner_update = bool(latest and _version_parts(latest) > _version_parts(current))
     manager_update = bool(
         latest_manager
@@ -579,6 +613,7 @@ async def api_version(
     return {
         "manager": manager_version,
         "latest_manager": latest_manager,
+        "latest_manager_release": manager_release,
         "runner": current,
         "latest_runner": latest,
         "manager_update_available": manager_update,
@@ -590,7 +625,34 @@ async def api_version(
             f"{request.app.state.settings.manager_repository}/releases"
         ),
         "runner_release_url": "https://github.com/actions/runner/releases",
+        "checked_at": datetime.now(UTC).isoformat(),
     }
+
+
+@router.get("/api/notifications")
+async def api_notifications(
+    request: Request, _: Annotated[AuthContext, Depends(require_auth)]
+) -> dict[str, Any]:
+    return _notifications(request).status()
+
+
+@router.post("/api/notifications/test")
+async def api_test_notification(
+    request: Request,
+    _: Annotated[AuthContext, Depends(require_mutation)],
+) -> dict[str, bool]:
+    if not _notifications(request).configured:
+        raise HTTPException(status_code=409, detail="notification webhook is not configured")
+    delivered = await _notifications(request).send(
+        "test",
+        "EasyRunners test notification",
+        "Your failure webhook is configured correctly.",
+        details={"trigger": "dashboard"},
+        force=True,
+    )
+    if not delivered:
+        raise HTTPException(status_code=502, detail="notification webhook delivery failed")
+    return {"delivered": True}
 
 
 @router.get("/api/auth/tokens")

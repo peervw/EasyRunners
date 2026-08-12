@@ -44,3 +44,13 @@ RECONCILE_DURATION = Histogram(
     "Scheduler reconciliation duration",
     ["reason"],
 )
+NOTIFICATIONS_SENT = Counter(
+    "github_runner_manager_notifications_sent_total",
+    "Outbound operational notifications delivered",
+    ["event"],
+)
+NOTIFICATION_FAILURES = Counter(
+    "github_runner_manager_notification_failures_total",
+    "Outbound operational notification delivery failures",
+    ["event"],
+)
