@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import re
+import tomllib
 from pathlib import Path
 
 import yaml
@@ -88,9 +89,24 @@ def test_dependency_and_release_automation_is_configured() -> None:
         (REPOSITORY_ROOT / "release-please-config.json").read_text()
     )
     assert release["release-type"] == "simple"
-    assert set(release["extra-files"]) == {"pyproject.toml", "uv.lock"}
-    assert "x-release-please-version" in (REPOSITORY_ROOT / "pyproject.toml").read_text()
-    assert "x-release-please-version" in (REPOSITORY_ROOT / "uv.lock").read_text()
+    assert release["extra-files"] == [
+        {
+            "type": "toml",
+            "path": "pyproject.toml",
+            "jsonpath": "$.project.version",
+        },
+        {
+            "type": "toml",
+            "path": "uv.lock",
+            "jsonpath": "$.package[?(@.name.value == 'easy-runners')].version",
+        },
+    ]
+    project = tomllib.loads((REPOSITORY_ROOT / "pyproject.toml").read_text())
+    lock = tomllib.loads((REPOSITORY_ROOT / "uv.lock").read_text())
+    locked_project = next(
+        package for package in lock["package"] if package["name"] == "easy-runners"
+    )
+    assert locked_project["version"] == project["project"]["version"]
 
 
 def test_default_config_has_standard_and_docker_pools() -> None:

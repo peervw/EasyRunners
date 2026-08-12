@@ -4,8 +4,16 @@
   "include-component-in-tag": false,
   "changelog-path": "CHANGELOG.md",
   "extra-files": [
-    "pyproject.toml",
-    "uv.lock"
+    {
+      "type": "toml",
+      "path": "pyproject.toml",
+      "jsonpath": "$.project.version"
+    },
+    {
+      "type": "toml",
+      "path": "uv.lock",
+      "jsonpath": "$.package[?(@.name.value == 'easy-runners')].version"
+    }
   ],
   "packages": {
     ".": {
