@@ -1,3 +1,4 @@
+import os
 import stat
 from datetime import UTC, datetime
 from pathlib import Path
@@ -145,3 +146,32 @@ async def test_remove_archives_then_destroys(settings) -> None:
     assert client.containers.container.stopped
     assert client.containers.container.removed
     assert (settings.data_dir / "runner-logs/runner-id.tar").read_bytes() == b"diagnostics"
+
+
+@pytest.mark.asyncio
+async def test_diagnostic_capture_and_cleanup_can_be_disabled(settings) -> None:
+    settings.runner_log_capture_enabled = False
+    settings.runner_log_cleanup_enabled = False
+    client = FakeClient()
+    manager = DockerRunnerManager(settings, client)
+    runner = ManagedRunner(
+        runner_id="no-log",
+        name="runner",
+        pool="default",
+        container_id=client.containers.container.id,
+        container_status="running",
+        created_at=datetime.now(UTC),
+    )
+    await manager.remove_runner(runner, "test")
+    assert not (settings.data_dir / "runner-logs/no-log.tar").exists()
+
+    logs = settings.data_dir / "runner-logs"
+    logs.mkdir(parents=True)
+    old = logs / "old.log"
+    old.write_text("old")
+    os.utime(old, (0, 0))
+    await manager.prune_logs()
+    assert old.exists()
+    settings.runner_log_cleanup_enabled = True
+    await manager.prune_logs()
+    assert not old.exists()

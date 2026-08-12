@@ -167,6 +167,43 @@ class Database:
             ).fetchall()
             return [json.loads(row["payload"]) for row in rows]
 
+    def usage_summary(self, now: datetime | None = None) -> dict[str, dict[str, Any]]:
+        current = now or datetime.now(UTC)
+        jobs = self.list_history(self.history_limit)
+        windows = {"24h": timedelta(hours=24), "7d": timedelta(days=7)}
+        failure_conclusions = {"failure", "timed_out", "cancelled", "startup_failure"}
+        result: dict[str, dict[str, Any]] = {}
+        for name, window in windows.items():
+            cutoff = current - window
+            selected = [
+                job
+                for job in jobs
+                if (completed := _parse_datetime(job.get("completed_at"))) and completed >= cutoff
+            ]
+            runtimes: list[float] = []
+            queue_times: list[float] = []
+            for job in selected:
+                queued = _parse_datetime(job.get("queued_at"))
+                started = _parse_datetime(job.get("started_at"))
+                completed = _parse_datetime(job.get("completed_at"))
+                if started and completed and completed >= started:
+                    runtimes.append((completed - started).total_seconds())
+                if queued and started and started >= queued:
+                    queue_times.append((started - queued).total_seconds())
+            failures = sum(
+                str(job.get("conclusion") or "").lower() in failure_conclusions
+                for job in selected
+            )
+            result[name] = {
+                "jobs": len(selected),
+                "runner_minutes": round(sum(runtimes) / 60, 1),
+                "average_queue_seconds": (
+                    round(sum(queue_times) / len(queue_times)) if queue_times else None
+                ),
+                "failure_rate": round(failures * 100 / len(selected), 1) if selected else 0.0,
+            }
+        return result
+
     def create_setup_state(
         self, state: str, payload: dict[str, Any], ttl_seconds: int = 3600
     ) -> None:
@@ -187,3 +224,13 @@ class Database:
             if not row or datetime.fromisoformat(row["expires_at"]) < now:
                 return None
             return cast(dict[str, Any], json.loads(row["payload"]))
+
+
+def _parse_datetime(value: Any) -> datetime | None:
+    if not value:
+        return None
+    try:
+        parsed = datetime.fromisoformat(str(value).replace("Z", "+00:00"))
+    except ValueError:
+        return None
+    return parsed if parsed.tzinfo else parsed.replace(tzinfo=UTC)

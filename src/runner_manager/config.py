@@ -43,9 +43,13 @@ class Settings(BaseSettings):
     poll_runs_per_repo: int = 20
     assignment_grace_seconds: int = 15
     history_limit: int = 500
+    runner_log_capture_enabled: bool = True
+    runner_log_cleanup_enabled: bool = True
     runner_log_retention_days: int = 7
     cleanup_idle_on_shutdown: bool = False
     webhook_enabled: bool = True
+
+    manager_repository: str = "peervw/EasyRunners"
 
     github_auth_mode: Literal["onboarding", "app", "pat", "auto"] = "onboarding"
     github_api_url: str = "https://api.github.com"

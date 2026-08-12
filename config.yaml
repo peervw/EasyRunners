@@ -4,6 +4,8 @@ manager:
   full_poll_interval: 300
   poll_concurrency: 5
   history_limit: 500
+  runner_log_capture_enabled: true
+  runner_log_cleanup_enabled: true
   runner_log_retention_days: 7
 
 runner_pools:

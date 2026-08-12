@@ -21,7 +21,7 @@ from runner_manager.database import Database
 from runner_manager.demand import DemandTracker
 from runner_manager.docker import DockerRunnerManager
 from runner_manager.github import GitHubClient, GitHubConnectionStore
-from runner_manager.models import RunnerPoolConfig
+from runner_manager.models import DiagnosticSettings, RunnerPoolConfig
 from runner_manager.scheduler import Scheduler
 
 
@@ -49,7 +49,7 @@ def create_app(settings: Settings | None = None, *, start_scheduler: bool = True
     asset_version = hashlib.sha256(
         b"".join(
             (package_dir / "static" / name).read_bytes()
-            for name in ("app.css", "easy.css", "app.js")
+            for name in ("app.css", "easy.css", "theme.js", "app.js")
         )
     ).hexdigest()[:12]
 
@@ -65,6 +65,16 @@ def create_app(settings: Settings | None = None, *, start_scheduler: bool = True
                 }
             except (TypeError, ValueError) as exc:
                 structlog.get_logger().error("config.saved_pools_invalid", error=str(exc))
+        if saved_diagnostics := database.get_setting("diagnostic_settings"):
+            try:
+                diagnostics = DiagnosticSettings.model_validate_json(saved_diagnostics)
+                configured.runner_log_capture_enabled = diagnostics.capture_enabled
+                configured.runner_log_cleanup_enabled = diagnostics.cleanup_enabled
+                configured.runner_log_retention_days = diagnostics.retention_days
+            except ValueError as exc:
+                structlog.get_logger().error(
+                    "config.saved_diagnostic_settings_invalid", error=str(exc)
+                )
         auth = AuthManager(configured, database)
         store = GitHubConnectionStore(configured, database)
         github = GitHubClient(configured, store)

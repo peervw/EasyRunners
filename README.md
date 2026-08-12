@@ -52,7 +52,8 @@ advanced settings. Route the public HTTPS domain to the `manager` service on por
 
 The first boot prints an `auth.bootstrap_password` JSON event exactly once. Open `PUBLIC_URL`, sign
 in with that password, and replace it with a password of at least 14 characters. Paste the account
-URL, such as `https://github.com/peervw`, then select **Connect GitHub**:
+URL, such as `https://github.com/peervw`, under **Settings → GitHub integration**, then select
+**Connect GitHub**:
 
 1. EasyRunners detects the account and whether it is a user or organization.
 2. GitHub creates the preconfigured private App and asks where to install it.
@@ -82,7 +83,7 @@ runs-on: [self-hosted, linux, rust]
 
 Push the change. The dashboard shows the job as queued, creates a fresh runner for that repository,
 shows it as busy, and removes its container and workspace when the job finishes. The dashboard's
-**Use an existing workflow** section shows the exact line for every configured pool and diagnoses
+**Workflow labels** card shows the exact line for every configured pool and diagnoses
 jobs whose labels do not match a pool.
 
 That's it—future matching jobs scale up and clean themselves up automatically.
@@ -322,10 +323,12 @@ Authorization: Bearer ert_...
 Endpoints:
 
 - `GET /health` — intentionally minimal unauthenticated liveness
-- `GET /api/status`, `/api/runners`, `/api/pools`, `/api/history`
+- `GET /api/status`, `/api/runners`, `/api/pools`, `/api/history`, `/api/usage`
 - `GET /api/readiness` and `/api/version`
 - `GET /api/jobs` for queued and in-progress workflow jobs
-- `GET /api/diagnostics` and `/api/diagnostics/{name}` for retained runner archives
+- `GET /api/diagnostics` and `/api/diagnostics/{name}` for retained runner archives; `DELETE
+  /api/diagnostics` clears them
+- `GET|PUT /api/settings/diagnostics` for capture, automatic cleanup, and retention settings
 - `PUT|DELETE /api/pools/{pool}` and YAML pool import/export endpoints
 - `POST /api/pools/{pool}/scale` with
   `{"desired": 2, "ttl_seconds": 600, "repository": "owner/repository"}`
@@ -342,12 +345,15 @@ pool capacity reached, Docker unavailable, or GitHub unavailable. Structured eve
 `runner.created`, `runner.online`, `runner.job_started`,
 `runner.job_finished`, `runner.removed`, `github.api_error`, and `scheduler.reconcile`. Diagnostic
 archives are retained under `/data/runner-logs` for seven days by default. Treat them as sensitive.
+Capture and automatic cleanup are enabled by default and can be changed under **Settings →
+Diagnostics**. The theme selector under **Settings → Appearance** supports system, light, and dark
+modes and is stored in the browser.
 
 ## Updating
 
-The dashboard compares the pinned runner version with GitHub's latest release and shows when they
-differ. It deliberately does not update automatically because runner releases use a progressive
-rollout.
+The dashboard checks EasyRunners releases and compares the pinned runner version with GitHub's
+latest release. It deliberately does not update automatically because runner releases use a
+progressive rollout.
 
 Update and rebuild from source:
 

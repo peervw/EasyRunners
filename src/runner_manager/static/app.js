@@ -10,6 +10,7 @@ let repositoryBound = false;
 let refreshing = false;
 let dashboardCache = {};
 let lastRefreshFailure = '';
+let usagePeriod = '24h';
 
 function toast(message, kind = 'error') {
   const item = document.createElement('div');
@@ -24,6 +25,78 @@ function duration(seconds) {
   const hours = Math.floor(seconds / 3600);
   const minutes = Math.floor((seconds % 3600) / 60);
   return hours ? `${hours}h ${minutes}m` : `${minutes}m`;
+}
+
+function formatBytes(bytes) {
+  const value = Math.max(0, Number(bytes) || 0);
+  if (value < 1024) return `${value} B`;
+  if (value < 1024 ** 2) return `${(value / 1024).toFixed(1)} KiB`;
+  return `${(value / 1024 ** 2).toFixed(1)} MiB`;
+}
+
+function renderUsage(usage) {
+  const period = usage?.[usagePeriod] || {};
+  document.querySelector('#usage-jobs').textContent = period.jobs ?? 0;
+  document.querySelector('#usage-minutes').textContent = `${period.runner_minutes ?? 0}m`;
+  document.querySelector('#usage-queue').textContent = period.average_queue_seconds == null
+    ? '—'
+    : duration(period.average_queue_seconds);
+  document.querySelector('#usage-failure').textContent = `${period.failure_rate ?? 0}%`;
+}
+
+function renderSetupChecklist(github, readiness, history) {
+  const panel = document.querySelector('#setup-checklist');
+  const passwordReady = panel.dataset.passwordReady === 'true';
+  const webhookEnabled = Boolean(github.connection?.webhook_enabled);
+  const steps = [
+    ['Administrator password', passwordReady],
+    ['GitHub App connected', Boolean(github.installed)],
+    ['Webhook received', Boolean(github.installed && (!webhookEnabled || readiness.checks?.webhook?.ok))],
+    ['First job completed', history.length > 0],
+  ];
+  panel.hidden = steps.every(([, done]) => done);
+  document.querySelector('#setup-checklist-items').innerHTML = steps.map(([label, done]) =>
+    `<div class="checklist-item ${done ? 'done' : ''}"><span class="checklist-mark" aria-hidden="true">${done ? '✓' : ''}</span><span>${esc(label)}</span></div>`,
+  ).join('');
+}
+
+function renderVersions(versions) {
+  const manager = versions.manager || 'unknown';
+  const runner = versions.runner || 'unknown';
+  document.querySelector('#version').textContent = `EasyRunners ${manager} · Runner ${runner}`;
+  document.querySelector('#manager-version').textContent = versions.manager_update_available
+    ? `${manager} → ${versions.latest_manager}`
+    : manager;
+  document.querySelector('#runner-version').textContent = versions.runner_update_available
+    ? `${runner} → ${versions.latest_runner}`
+    : runner;
+  const available = Boolean(versions.update_available);
+  const badge = document.querySelector('#update-badge');
+  badge.textContent = available ? 'Update available' : 'Up to date';
+  badge.className = `badge ${available ? 'warning' : 'online'}`;
+  document.querySelector('#update-summary').textContent = available
+    ? 'Review the available versions before rebuilding.'
+    : 'No newer release was found.';
+  document.querySelector('#update-command').textContent = versions.source_update_command
+    || 'git pull --ff-only && docker compose up -d --build';
+  document.querySelector('#update-links').innerHTML = [
+    versions.manager_release_url ? `<a href="${esc(versions.manager_release_url)}" target="_blank" rel="noopener">EasyRunners releases</a>` : '',
+    versions.runner_release_url ? `<a href="${esc(versions.runner_release_url)}" target="_blank" rel="noopener">Runner releases</a>` : '',
+  ].filter(Boolean).join('<span class="muted">·</span>');
+}
+
+function poolHealth(name, pool, status, readiness) {
+  const active = pool.starting + pool.idle + pool.busy;
+  const imageAvailable = readiness.checks?.runner_images?.detail?.[name];
+  if (!status.last_reconcile) return ['Checking', '', 'Waiting for the first reconciliation'];
+  if (pool.last_error) return ['Error', 'error', pool.last_error];
+  if (status.docker !== 'connected') return ['Docker offline', 'error', 'Docker Engine is unavailable'];
+  if (imageAvailable === false) return ['Image missing', 'error', 'The configured runner image was not found'];
+  if (pool.queued && status.github !== 'connected') return ['GitHub offline', 'error', 'GitHub is unavailable'];
+  if (pool.queued && active >= pool.max) return ['At capacity', 'warning', `Maximum ${pool.max} runners`];
+  if (pool.starting) return ['Starting', 'warning', 'A runner is registering'];
+  if (pool.queued) return ['Scaling', 'warning', 'Capacity is being created'];
+  return ['Healthy', 'healthy', 'No current issues'];
 }
 
 function orderedLabels(labels) {
@@ -117,6 +190,7 @@ async function refresh() {
       status: '/api/status', runners: '/api/runners', jobs: '/api/jobs',
       history: '/api/history?limit=50', tokens: '/api/auth/tokens', github: '/api/github',
       readiness: '/api/readiness', versions: '/api/version', diagnostics: '/api/diagnostics',
+      usage: '/api/usage', diagnosticSettings: '/api/settings/diagnostics',
     };
     const entries = Object.entries(requests);
     const results = await Promise.allSettled(entries.map(([, url]) => json(url)));
@@ -140,6 +214,11 @@ async function refresh() {
     const readiness = dashboardCache.readiness || {ready: false, checks: {}};
     const versions = dashboardCache.versions || {manager: 'unknown', runner: 'unknown'};
     const diagnostics = dashboardCache.diagnostics || [];
+    const usage = dashboardCache.usage || {};
+    const diagnosticSettings = dashboardCache.diagnosticSettings || {
+      capture_enabled: true, cleanup_enabled: true, retention_days: 7,
+      file_count: 0, total_size: 0, oldest_at: null,
+    };
     const poolEntries = Object.entries(status.pools);
     const busyCount = poolEntries.reduce((total, [, pool]) => total + pool.busy, 0);
     const queuedCount = jobs.filter(job => job.status === 'queued').length;
@@ -182,21 +261,22 @@ async function refresh() {
     document.querySelector('#updated').textContent = status.last_reconcile
       ? `Updated ${new Date(status.last_reconcile).toLocaleTimeString()}`
       : '';
-    document.querySelector('#version').textContent = versions.update_available
-      ? `Runner ${versions.runner} · ${versions.latest_runner} available`
-      : `EasyRunners ${versions.manager} · Runner ${versions.runner}`;
+    renderVersions(versions);
     renderReadiness(readiness);
+    renderUsage(usage);
+    renderSetupChecklist(github, readiness, history);
 
     poolConfigs = Object.fromEntries(poolEntries.map(([name, pool]) => [name, pool.config]));
     document.querySelector('#pools').innerHTML = poolEntries.map(([name, pool]) => {
       const active = pool.starting + pool.idle + pool.busy;
       const capacity = pool.max ? Math.min(100, Math.round((active / pool.max) * 100)) : 0;
       const labels = orderedLabels(pool.labels);
+      const [healthLabel, healthClass, healthDetail] = poolHealth(name, pool, status, readiness);
       return `
       <article class="pool-card">
         <div class="pool-heading">
           <div class="pool-title"><span class="pool-avatar">${esc(name.slice(0, 2))}</span><div><h3>${esc(name)}</h3><small>${pool.config.docker_mode === 'socket' ? 'Docker socket' : 'No Docker access'} · min ${pool.min}, max ${pool.max}</small></div></div>
-          <div class="pool-card-actions"><button class="ghost compact edit-pool" data-pool="${esc(name)}" title="Edit pool">Edit</button><button class="ghost compact delete-pool" data-pool="${esc(name)}" title="Delete pool">Delete</button></div>
+          <div class="pool-heading-actions"><span class="badge ${healthClass}" title="${esc(healthDetail)}">${esc(healthLabel)}</span><div class="pool-card-actions"><button class="ghost compact edit-pool" data-pool="${esc(name)}" title="Edit pool">Edit</button><button class="ghost compact delete-pool" data-pool="${esc(name)}" title="Delete pool">Delete</button></div></div>
         </div>
         <div class="pool-stats">
           <div class="pool-stat"><strong>${pool.queued}</strong><span>Queued</span></div>
@@ -250,7 +330,7 @@ async function refresh() {
       : '<tr><td colspan="7" class="empty-cell">No active runners.</td></tr>';
     document.querySelector('#job-count').textContent = jobs.length;
     document.querySelector('#jobs').innerHTML = jobs.length
-      ? jobs.map(job => `<tr><td>${esc(job.name || job.id)}${job.waiting_reason ? `<small class="job-reason">${esc(job.waiting_reason)}</small>` : ''}</td><td>${esc(job.repository)}</td><td>${job.pool ? esc(job.pool) : `<span class="unmatched">No pool matches [${job.labels.map(esc).join(', ')}]</span> <button class="secondary compact copy-replacement">Copy replacement</button>`}</td><td><span class="badge ${esc(job.status)}">${esc(job.status)}</span></td><td>${esc(job.runner_name || '—')}</td><td>${job.queued_at ? new Date(job.queued_at).toLocaleString() : '—'}</td></tr>`).join('')
+      ? jobs.map(job => `<tr><td>${esc(job.name || job.id)}</td><td>${esc(job.repository)}</td><td>${job.pool ? esc(job.pool) : `<span class="unmatched">No pool matches [${job.labels.map(esc).join(', ')}]</span> <button class="secondary compact copy-replacement">Copy replacement</button>`}</td><td><span class="badge ${esc(job.status)}">${esc(job.status)}</span>${job.waiting_reason ? `<small class="job-reason">${esc(job.waiting_reason)}</small>` : ''}</td><td>${esc(job.runner_name || '—')}</td><td>${job.queued_at ? new Date(job.queued_at).toLocaleString() : '—'}</td></tr>`).join('')
       : '<tr><td colspan="6" class="empty-cell">No queued or active jobs.</td></tr>';
     document.querySelector('#history-count').textContent = history.length;
     document.querySelector('#history').innerHTML = history.length
@@ -262,6 +342,17 @@ async function refresh() {
     document.querySelector('#diagnostics').innerHTML = diagnostics.length
       ? diagnostics.map(item => `<li><a href="/api/diagnostics/${encodeURIComponent(item.name)}">${esc(item.name)}</a><small class="muted">${Math.ceil(item.size / 1024)} KiB · ${new Date(item.modified_at).toLocaleString()}</small></li>`).join('')
       : '<li class="muted">No saved diagnostics.</li>';
+    document.querySelector('#diagnostic-summary').textContent = diagnosticSettings.file_count
+      ? `${diagnosticSettings.file_count} files · ${formatBytes(diagnosticSettings.total_size)} · oldest ${new Date(diagnosticSettings.oldest_at).toLocaleDateString()}`
+      : 'No disk space used.';
+    const diagnosticForm = document.querySelector('#diagnostic-settings-form');
+    if (!diagnosticForm.dataset.dirty) {
+      diagnosticForm.capture_enabled.checked = diagnosticSettings.capture_enabled;
+      diagnosticForm.cleanup_enabled.checked = diagnosticSettings.cleanup_enabled;
+      diagnosticForm.retention_days.value = String(diagnosticSettings.retention_days);
+    }
+    diagnosticForm.retention_days.disabled = !diagnosticForm.cleanup_enabled.checked;
+    document.querySelector('#clear-diagnostics').disabled = diagnosticSettings.file_count === 0;
     bindDynamic();
   } catch (error) {
     toast(`Dashboard refresh failed: ${error.message || error}`);
@@ -352,6 +443,31 @@ document.querySelector('#token-form')?.addEventListener('submit', async event =>
   event.target.reset();
   refresh();
 });
+document.querySelector('#diagnostic-settings-form')?.addEventListener('input', event => {
+  event.currentTarget.dataset.dirty = 'true';
+  event.currentTarget.retention_days.disabled = !event.currentTarget.cleanup_enabled.checked;
+});
+document.querySelector('#diagnostic-settings-form')?.addEventListener('submit', async event => {
+  event.preventDefault();
+  const form = event.currentTarget;
+  const result = await action(() => json('/api/settings/diagnostics', {
+    method: 'PUT', headers, body: JSON.stringify({
+      capture_enabled: form.capture_enabled.checked,
+      cleanup_enabled: form.cleanup_enabled.checked,
+      retention_days: Number(form.retention_days.value),
+    }),
+  }), 'Diagnostic settings saved.');
+  if (result) {
+    delete form.dataset.dirty;
+    dashboardCache.diagnosticSettings = result;
+    refresh();
+  }
+});
+document.querySelector('#clear-diagnostics')?.addEventListener('click', async () => {
+  if (!window.confirm('Delete all saved runner diagnostics?')) return;
+  const result = await action(() => json('/api/diagnostics', {method: 'DELETE', headers}), 'Diagnostics deleted.');
+  if (result) refresh();
+});
 document.querySelector('#github-setup')?.addEventListener('submit', async event => {
   event.preventDefault();
   const progress = document.querySelector('#setup-progress');
@@ -407,6 +523,27 @@ document.querySelector('#quickstart-pool')?.addEventListener('change', updateRun
 document.querySelector('#copy-runs-on')?.addEventListener('click', async () => {
   const content = document.querySelector('#runs-on-line').textContent;
   await action(() => navigator.clipboard.writeText(content), 'runs-on line copied.');
+});
+document.querySelector('#copy-update-command')?.addEventListener('click', async () => {
+  const content = document.querySelector('#update-command').textContent;
+  await action(() => navigator.clipboard.writeText(content), 'Update command copied.');
+});
+document.querySelector('#setup-settings')?.addEventListener('click', () => selectAppView('settings'));
+
+const themeSelect = document.querySelector('#theme-select');
+if (themeSelect && window.EasyRunnersTheme) {
+  themeSelect.value = window.EasyRunnersTheme.preference();
+  themeSelect.addEventListener('change', () => window.EasyRunnersTheme.set(themeSelect.value));
+}
+
+document.querySelectorAll('[data-usage-period]').forEach(button => {
+  button.addEventListener('click', () => {
+    usagePeriod = button.dataset.usagePeriod;
+    document.querySelectorAll('[data-usage-period]').forEach(item => {
+      item.classList.toggle('active', item === button);
+    });
+    renderUsage(dashboardCache.usage || {});
+  });
 });
 
 function selectActivityTab(name) {

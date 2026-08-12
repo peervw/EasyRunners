@@ -226,6 +226,8 @@ class DockerRunnerManager:
         )
 
     def _archive_diagnostics(self, container: Container, runner: ManagedRunner) -> None:
+        if not self.settings.runner_log_capture_enabled:
+            return
         logs_dir = self.settings.data_dir / "runner-logs"
         logs_dir.mkdir(parents=True, exist_ok=True)
         try:
@@ -248,6 +250,8 @@ class DockerRunnerManager:
         await asyncio.to_thread(self._prune_logs)
 
     def _prune_logs(self) -> None:
+        if not self.settings.runner_log_cleanup_enabled:
+            return
         logs_dir = self.settings.data_dir / "runner-logs"
         if not logs_dir.exists():
             return
