@@ -4,229 +4,245 @@
     <meta charset="utf-8">
     <meta name="viewport" content="width=device-width,initial-scale=1">
     <meta name="csrf-token" content="{{ csrf }}">
-    <title>EasyRunners · Control plane</title>
+    <title>Dashboard · EasyRunners</title>
     <link rel="stylesheet" href="/static/app.css?v={{ asset_version }}">
     <link rel="stylesheet" href="/static/easy.css?v={{ asset_version }}">
     <script src="/static/app.js?v={{ asset_version }}" defer></script>
   </head>
   <body>
-    <header class="topbar">
-      <a class="brand" href="/" aria-label="EasyRunners dashboard">
-        <span class="brand-mark small" aria-hidden="true">ER</span>
-        <span class="brand-copy"><strong>EasyRunners</strong><small>Runner control plane</small></span>
-      </a>
-      <div class="topbar-actions">
-        <span class="live-status"><i aria-hidden="true"></i><span id="header-health">Syncing</span></span>
-        <form method="post" action="/auth/logout">
-          <input type="hidden" name="csrf_token" value="{{ csrf }}">
-          <button class="ghost compact" type="submit">Sign out</button>
-        </form>
-      </div>
-    </header>
+    <div class="app-shell">
+      <aside class="sidebar">
+        <a class="brand" href="#overview" data-view="overview" aria-label="EasyRunners dashboard">
+          <span class="brand-mark" aria-hidden="true">E</span>
+          <span>EasyRunners</span>
+        </a>
 
-    <main class="dashboard-shell">
-      {% if must_change %}
-      <section class="notice warning-panel" role="alert">
-        <div class="notice-icon" aria-hidden="true">!</div>
-        <div class="notice-copy">
-          <h2>Secure your dashboard</h2>
-          <p>Replace the one-time bootstrap password before connecting GitHub.</p>
+        <nav class="main-nav" aria-label="Main navigation">
+          <p class="nav-label">Workspace</p>
+          <a class="nav-item active" href="#overview" data-view="overview" aria-current="page">
+            <svg aria-hidden="true" viewBox="0 0 24 24"><rect width="7" height="9" x="3" y="3" rx="1"/><rect width="7" height="5" x="14" y="3" rx="1"/><rect width="7" height="9" x="14" y="12" rx="1"/><rect width="7" height="5" x="3" y="16" rx="1"/></svg>
+            Dashboard
+          </a>
+          <a class="nav-item" href="#activity" data-view="activity">
+            <svg aria-hidden="true" viewBox="0 0 24 24"><path d="M3 3v18h18"/><path d="m7 16 4-5 4 3 5-7"/></svg>
+            Activity
+          </a>
+          <a class="nav-item" href="#settings" data-view="settings">
+            <svg aria-hidden="true" viewBox="0 0 24 24"><path d="M12 15.5a3.5 3.5 0 1 0 0-7 3.5 3.5 0 0 0 0 7Z"/><path d="M19.4 15a1.7 1.7 0 0 0 .3 1.9l.1.1-2.8 2.8-.1-.1a1.7 1.7 0 0 0-1.9-.3 1.7 1.7 0 0 0-1 1.6v.2h-4V21a1.7 1.7 0 0 0-1-1.6 1.7 1.7 0 0 0-1.9.3l-.1.1L4.2 17l.1-.1a1.7 1.7 0 0 0 .3-1.9A1.7 1.7 0 0 0 3 14H2.8v-4H3a1.7 1.7 0 0 0 1.6-1 1.7 1.7 0 0 0-.3-1.9L4.2 7 7 4.2l.1.1a1.7 1.7 0 0 0 1.9.3A1.7 1.7 0 0 0 10 3V2.8h4V3a1.7 1.7 0 0 0 1 1.6 1.7 1.7 0 0 0 1.9-.3l.1-.1L19.8 7l-.1.1a1.7 1.7 0 0 0-.3 1.9 1.7 1.7 0 0 0 1.6 1h.2v4H21a1.7 1.7 0 0 0-1.6 1Z"/></svg>
+            Settings
+          </a>
+        </nav>
+
+        <div class="sidebar-footer">
+          <span class="status-dot" aria-hidden="true"></span>
+          <div><strong id="header-health">Checking status</strong><small>Manager</small></div>
         </div>
-        <form class="inline-form password-form" method="post" action="/auth/password">
-          <input type="hidden" name="csrf_token" value="{{ csrf }}">
-          <input name="current_password" type="password" placeholder="Current password" aria-label="Current password" required>
-          <input name="new_password" type="password" minlength="14" placeholder="New password (14+ characters)" aria-label="New password" required>
-          <button type="submit">Change password</button>
-        </form>
-      </section>
-      {% endif %}
+      </aside>
 
-      <section class="page-heading">
-        <div>
-          <p class="eyebrow">OVERVIEW</p>
-          <h1>Your runner fleet</h1>
-          <p class="page-subtitle">Ephemeral GitHub Actions capacity, ready exactly when your workflows need it.</p>
-        </div>
-        <div class="page-actions">
-          <span id="updated" class="sync-time">Waiting for first sync</span>
-          <button id="reconcile" class="secondary">Sync now</button>
-        </div>
-      </section>
-
-      <section class="metric-grid" aria-label="Runner overview">
-        <article class="metric-card">
-          <div class="metric-top"><span class="metric-icon runners-icon" aria-hidden="true">R</span><span class="trend neutral">Live</span></div>
-          <strong id="metric-runners">0</strong><span>Active runners</span>
-          <small>Starting, idle, and busy</small>
-        </article>
-        <article class="metric-card">
-          <div class="metric-top"><span class="metric-icon busy-icon" aria-hidden="true">B</span><span class="trend healthy">Working</span></div>
-          <strong id="metric-busy">0</strong><span>Busy now</span>
-          <small>Jobs currently executing</small>
-        </article>
-        <article class="metric-card">
-          <div class="metric-top"><span class="metric-icon queue-icon" aria-hidden="true">Q</span><span class="trend neutral">Demand</span></div>
-          <strong id="metric-queued">0</strong><span>Jobs queued</span>
-          <small>Waiting for a matching runner</small>
-        </article>
-        <article class="metric-card">
-          <div class="metric-top"><span class="metric-icon pool-icon" aria-hidden="true">P</span><span class="trend healthy">Configured</span></div>
-          <strong id="metric-pools">0</strong><span>Runner pools</span>
-          <small>Independent capacity policies</small>
-        </article>
-      </section>
-
-      <section class="setup-layout" aria-label="Setup and connection">
-        <article id="connection" class="panel connection-panel">
-          <div class="panel-heading">
-            <div><p class="section-kicker">STEP 1</p><h2>Connect GitHub</h2></div>
-            <span id="github-badge" class="badge">Loading</span>
+      <div class="app-main">
+        <header class="app-header">
+          <div>
+            <h1 id="view-title">Dashboard</h1>
+            <p id="view-description">Runner status and capacity</p>
           </div>
-          <div id="connection-details" class="connection-details"></div>
-          <div id="repository-access"></div>
-
-          {% if connection and not connection.installation_id and connection.app_slug %}
-          <div class="actions">
-            <a class="button-link" href="/setup/github/resume">Continue installation</a>
-            <button id="disconnect-github" class="ghost">Start over</button>
-          </div>
-          {% elif connection and connection.installation_id %}
-          <div class="connection-actions">
-            <form id="test-runner-form" class="inline-form test-runner-form">
-              <select id="test-repository" name="repository" aria-label="Test repository"></select>
-              <select id="test-pool" name="pool" aria-label="Test runner pool"></select>
-              <button type="submit">Test a runner</button>
+          <div class="header-actions">
+            <span id="updated" class="sync-time">Waiting for sync</span>
+            <button id="reconcile" class="secondary compact" type="button">
+              <svg aria-hidden="true" viewBox="0 0 24 24"><path d="M20 11a8.1 8.1 0 0 0-15.5-2M4 4v5h5"/><path d="M4 13a8.1 8.1 0 0 0 15.5 2M20 20v-5h-5"/></svg>
+              Sync
+            </button>
+            <form method="post" action="/auth/logout">
+              <input type="hidden" name="csrf_token" value="{{ csrf }}">
+              <button class="ghost compact" type="submit">Sign out</button>
             </form>
-            <button id="disconnect-github" class="ghost compact">Disconnect locally</button>
           </div>
-          {% endif %}
+        </header>
 
-          {% if not connection and not must_change %}
-          <form id="github-setup" class="connect-form">
-            <label>GitHub account or organization URL
-              <div class="input-action">
-                <input name="target_url" type="url" placeholder="https://github.com/owner" required>
-                <button type="submit">Connect GitHub</button>
-              </div>
-            </label>
-            <p class="supporting-text">You choose which trusted repositories get access during installation.</p>
-            <details class="setup-advanced">
-              <summary>Connection options</summary>
-              <div class="option-list">
-                <label class="check-label"><input name="organization_wide" type="checkbox"> Use shared organization runners</label>
-                <label class="check-label"><input name="webhook_enabled" type="checkbox" {% if webhook_enabled %}checked{% endif %}> Instant scaling with a public HTTPS webhook</label>
-              </div>
-              <p class="supporting-text">Shared organization runners should be restricted with GitHub runner groups. Disable webhooks only for private polling-only deployments.</p>
-            </details>
-            <span id="setup-progress" class="supporting-text" aria-live="polite"></span>
-          </form>
-          {% endif %}
-        </article>
-
-        <article class="panel quickstart-panel">
-          <div class="panel-heading">
-            <div><p class="section-kicker">STEP 2</p><h2>Route a workflow</h2></div>
-            <span class="badge accent">One line</span>
-          </div>
-          <p class="panel-lead">Choose a pool and replace the job's existing <code>runs-on</code> line.</p>
-          <label class="field-label" for="quickstart-pool">Runner pool</label>
-          <select id="quickstart-pool" aria-label="Runner pool"></select>
-          <div class="code-copy">
-            <code id="runs-on-line">runs-on: [self-hosted, linux, docker]</code>
-            <button id="copy-runs-on" class="copy-button" type="button" aria-label="Copy runs-on line">Copy</button>
-          </div>
-          <div class="flow-line" aria-label="Workflow lifecycle">
-            <span>Push</span><i></i><span>Queue</span><i></i><span>Run</span><i></i><span>Clean up</span>
-          </div>
-        </article>
-      </section>
-
-      <section class="panel readiness-panel">
-        <div class="panel-heading readiness-heading">
-          <div><p class="section-kicker">SYSTEM CHECK</p><h2>Deployment readiness</h2></div>
-          <div class="readiness-meta"><span id="version"></span><span id="readiness-badge" class="badge">Checking</span></div>
-        </div>
-        <div id="readiness" class="check-list"></div>
-        <p class="supporting-text readiness-note">Webhook reachability is informational; polling-only installations can still be ready.</p>
-      </section>
-
-      <section class="content-section" aria-labelledby="pools-heading">
-        <div class="content-heading">
-          <div><p class="section-kicker">CAPACITY</p><h2 id="pools-heading">Runner pools</h2><p>One universal image, separated by labels, limits, and Docker access.</p></div>
-          <button id="new-pool" class="secondary">Add pool</button>
-        </div>
-        <div id="pools" class="pool-grid"></div>
-      </section>
-
-      <section class="panel activity-panel" aria-labelledby="activity-heading">
-        <div class="activity-header">
-          <div><p class="section-kicker">ACTIVITY</p><h2 id="activity-heading">Workflow activity</h2></div>
-          <div class="activity-tabs" role="tablist" aria-label="Workflow activity views">
-            <button class="activity-tab active" role="tab" aria-selected="true" aria-controls="runners-panel" data-activity-tab="runners">Runners <span id="runner-count">0</span></button>
-            <button class="activity-tab" role="tab" aria-selected="false" aria-controls="jobs-panel" data-activity-tab="jobs">Jobs <span id="job-count">0</span></button>
-            <button class="activity-tab" role="tab" aria-selected="false" aria-controls="history-panel" data-activity-tab="history">History <span id="history-count">0</span></button>
-          </div>
-        </div>
-
-        <div id="runners-panel" class="activity-view" role="tabpanel" data-activity-panel="runners">
-          <div class="table-wrap"><table><thead><tr><th>Runner</th><th>Repository</th><th>Pool</th><th>State</th><th>Uptime</th><th>Container</th><th>Labels</th></tr></thead><tbody id="runners"></tbody></table></div>
-        </div>
-        <div id="jobs-panel" class="activity-view" role="tabpanel" data-activity-panel="jobs" hidden>
-          <div class="table-wrap"><table><thead><tr><th>Job</th><th>Repository</th><th>Pool</th><th>Status</th><th>Runner</th><th>Queued</th></tr></thead><tbody id="jobs"></tbody></table></div>
-        </div>
-        <div id="history-panel" class="activity-view" role="tabpanel" data-activity-panel="history" hidden>
-          <div class="table-wrap"><table><thead><tr><th>Job</th><th>Repository</th><th>Pool</th><th>Conclusion</th><th>Completed</th></tr></thead><tbody id="history"></tbody></table></div>
-        </div>
-      </section>
-
-      <details class="panel settings-panel">
-        <summary>
-          <span class="settings-icon" aria-hidden="true">⚙</span>
-          <span><strong>Administration</strong><small>Pools, API access, diagnostics, and YAML configuration</small></span>
-          <span class="summary-action">Open settings</span>
-        </summary>
-        <div class="settings-content">
-          <section id="pool-editor" class="settings-section">
-            <div class="content-heading compact-heading">
-              <div><h2>Add or edit a pool</h2><p>Customize capacity and isolation while reusing the universal runner image.</p></div>
-              <button id="rust-pool" class="ghost compact" type="button">Use Rust preset</button>
+        <main class="page-content">
+          {% if must_change %}
+          <section class="notice" role="alert">
+            <div>
+              <h2>Change the administrator password</h2>
+              <p>The bootstrap password is temporary.</p>
             </div>
-            <form id="pool-form" class="form-grid">
-              <label>Name<input name="pool_name" value="default" pattern="[A-Za-z0-9_.-]+" required></label>
-              <label>Labels<input name="labels" value="self-hosted,linux,docker" required></label>
-              <label>Minimum<input name="min" type="number" min="0" value="0" required></label>
-              <label>Maximum<input name="max" type="number" min="0" value="5" required></label>
-              <label>CPU cores<input name="cpu" type="number" min="0.1" step="0.1" value="4" required></label>
-              <label>Memory<input name="memory" value="8g" required></label>
-              <label>Runner image<input name="image" placeholder="Blank uses the universal image"></label>
-              <label>Docker access<select name="docker_mode"><option value="socket">Docker socket</option><option value="none">No Docker</option></select></label>
-              <div class="form-submit"><button type="submit">Save pool</button></div>
+            <form class="inline-form password-form" method="post" action="/auth/password">
+              <input type="hidden" name="csrf_token" value="{{ csrf }}">
+              <input name="current_password" type="password" placeholder="Current password" aria-label="Current password" required>
+              <input name="new_password" type="password" minlength="14" placeholder="New password" aria-label="New password" required>
+              <button type="submit">Update password</button>
             </form>
-            <p class="supporting-text">Repository-isolated installations pre-warm capacity per repository. A non-zero pool minimum uses the first selected repository.</p>
-            <details class="yaml-settings">
-              <summary>Import or export pool YAML</summary>
-              <textarea id="pool-yaml" class="code-editor" spellcheck="false" aria-label="Pool YAML"></textarea>
-              <div class="actions"><button id="export-pools" class="secondary" type="button">Export current</button><button id="import-pools" type="button">Import and replace</button></div>
-            </details>
+          </section>
+          {% endif %}
+
+          <section class="view-panel" data-view-panel="overview">
+            <section class="metric-grid" aria-label="Runner overview">
+              <article class="metric-card">
+                <div><span>Active runners</span><small>Starting, idle, and busy</small></div>
+                <strong id="metric-runners">0</strong>
+              </article>
+              <article class="metric-card">
+                <div><span>Busy</span><small>Jobs in progress</small></div>
+                <strong id="metric-busy">0</strong>
+              </article>
+              <article class="metric-card">
+                <div><span>Queued</span><small>Waiting for a runner</small></div>
+                <strong id="metric-queued">0</strong>
+              </article>
+              <article class="metric-card">
+                <div><span>Pools</span><small>Capacity policies</small></div>
+                <strong id="metric-pools">0</strong>
+              </article>
+            </section>
+
+            <div class="overview-grid">
+              <section class="card pools-card" aria-labelledby="pools-heading">
+                <div class="card-header">
+                  <div><h2 id="pools-heading">Runner pools</h2><p>Current capacity and labels.</p></div>
+                  <button id="new-pool" class="secondary compact" type="button">
+                    <svg aria-hidden="true" viewBox="0 0 24 24"><path d="M12 5v14M5 12h14"/></svg>
+                    Add pool
+                  </button>
+                </div>
+                <div id="pools" class="pool-list"></div>
+              </section>
+
+              <aside class="card workflow-card">
+                <div class="card-header"><div><h2>Workflow labels</h2><p>Use this value for <code>runs-on</code>.</p></div></div>
+                <div class="card-content">
+                  <label for="quickstart-pool">Runner pool</label>
+                  <select id="quickstart-pool" aria-label="Runner pool"></select>
+                  <div class="code-copy">
+                    <code id="runs-on-line">runs-on: [self-hosted, linux, docker]</code>
+                    <button id="copy-runs-on" class="secondary compact" type="button" aria-label="Copy runs-on line">Copy</button>
+                  </div>
+                  <p class="help-text">Replace the job's existing <code>runs-on</code> value and push the workflow.</p>
+                </div>
+              </aside>
+            </div>
           </section>
 
-          <div class="settings-grid">
-            <section class="settings-section compact-section">
-              <div><p class="section-kicker">ACCESS</p><h2>API tokens</h2><p class="supporting-text">Create narrow, revocable access for tools and monitoring.</p></div>
-              <form id="token-form" class="stack-form">
-                <input name="name" placeholder="Token name" aria-label="Token name" required>
-                <div class="inline-form"><select name="scope" aria-label="Token scope"><option value="read">Read-only</option><option value="metrics">Metrics only</option><option value="manage">Full management</option></select><input name="expires_in_days" type="number" min="1" max="3650" placeholder="Expiry days" aria-label="Token expiry in days"><button type="submit">Create</button></div>
-              </form>
-              <div id="new-token"></div><ul id="tokens" class="token-list"></ul>
+          <section class="view-panel" data-view-panel="activity" hidden>
+            <section class="card activity-card" aria-labelledby="activity-heading">
+              <div class="card-header activity-header">
+                <div><h2 id="activity-heading">Activity</h2><p>Runners, current jobs, and recent results.</p></div>
+                <div class="tabs" role="tablist" aria-label="Activity views">
+                  <button class="tab active" role="tab" aria-selected="true" aria-controls="runners-panel" data-activity-tab="runners">Runners <span id="runner-count">0</span></button>
+                  <button class="tab" role="tab" aria-selected="false" aria-controls="jobs-panel" data-activity-tab="jobs">Jobs <span id="job-count">0</span></button>
+                  <button class="tab" role="tab" aria-selected="false" aria-controls="history-panel" data-activity-tab="history">History <span id="history-count">0</span></button>
+                </div>
+              </div>
+              <div id="runners-panel" class="activity-view" role="tabpanel" data-activity-panel="runners">
+                <div class="table-wrap"><table><thead><tr><th>Runner</th><th>Repository</th><th>Pool</th><th>State</th><th>Uptime</th><th>Container</th><th>Labels</th></tr></thead><tbody id="runners"></tbody></table></div>
+              </div>
+              <div id="jobs-panel" class="activity-view" role="tabpanel" data-activity-panel="jobs" hidden>
+                <div class="table-wrap"><table><thead><tr><th>Job</th><th>Repository</th><th>Pool</th><th>Status</th><th>Runner</th><th>Queued</th></tr></thead><tbody id="jobs"></tbody></table></div>
+              </div>
+              <div id="history-panel" class="activity-view" role="tabpanel" data-activity-panel="history" hidden>
+                <div class="table-wrap"><table><thead><tr><th>Job</th><th>Repository</th><th>Pool</th><th>Conclusion</th><th>Completed</th></tr></thead><tbody id="history"></tbody></table></div>
+              </div>
             </section>
-            <section class="settings-section compact-section">
-              <div><p class="section-kicker">SUPPORT</p><h2>Runner diagnostics</h2><p class="supporting-text">Download recent official runner archives captured during cleanup.</p></div>
-              <ul id="diagnostics" class="diagnostic-list"></ul>
+          </section>
+
+          <section class="view-panel settings-view" data-view-panel="settings" hidden>
+            <section id="connection" class="card settings-card">
+              <div class="settings-row">
+                <div class="settings-copy"><h2>GitHub integration</h2><p>App installation, repository access, and runner tests.</p></div>
+                <span id="github-badge" class="badge">Loading</span>
+              </div>
+              <div class="settings-body">
+                <div id="connection-details" class="connection-details"></div>
+                <div id="repository-access"></div>
+
+                {% if connection and not connection.installation_id and connection.app_slug %}
+                <div class="actions">
+                  <a class="button-link" href="/setup/github/resume">Continue installation</a>
+                  <button id="disconnect-github" class="ghost" type="button">Start over</button>
+                </div>
+                {% elif connection and connection.installation_id %}
+                <div class="connection-actions">
+                  <form id="test-runner-form" class="inline-form test-runner-form">
+                    <select id="test-repository" name="repository" aria-label="Test repository"></select>
+                    <select id="test-pool" name="pool" aria-label="Test runner pool"></select>
+                    <button type="submit">Start test runner</button>
+                  </form>
+                  <button id="disconnect-github" class="ghost compact" type="button">Disconnect</button>
+                </div>
+                {% endif %}
+
+                {% if not connection and not must_change %}
+                <form id="github-setup" class="connect-form">
+                  <label>GitHub account or organization URL
+                    <div class="input-action">
+                      <input name="target_url" type="url" placeholder="https://github.com/owner" required>
+                      <button type="submit">Connect GitHub</button>
+                    </div>
+                  </label>
+                  <details class="subtle-details">
+                    <summary>Options</summary>
+                    <div class="option-list">
+                      <label class="check-label"><input name="organization_wide" type="checkbox"> Use organization-level runners</label>
+                      <label class="check-label"><input name="webhook_enabled" type="checkbox" {% if webhook_enabled %}checked{% endif %}> Enable webhook scaling</label>
+                    </div>
+                  </details>
+                  <span id="setup-progress" class="help-text" aria-live="polite"></span>
+                </form>
+                {% endif %}
+              </div>
             </section>
-          </div>
-        </div>
-      </details>
-    </main>
+
+            <section class="card settings-card readiness-card">
+              <div class="settings-row">
+                <div class="settings-copy"><h2>System status</h2><p id="version">Loading version information</p></div>
+                <span id="readiness-badge" class="badge">Checking</span>
+              </div>
+              <div class="settings-body"><div id="readiness" class="check-list"></div></div>
+            </section>
+
+            <section id="pool-editor" class="card settings-card">
+              <div class="settings-row">
+                <div class="settings-copy"><h2>Pool configuration</h2><p>Add or update a runner pool.</p></div>
+                <button id="rust-pool" class="ghost compact" type="button">Rust preset</button>
+              </div>
+              <div class="settings-body">
+                <form id="pool-form" class="form-grid">
+                  <label>Name<input name="pool_name" value="default" pattern="[A-Za-z0-9_.-]+" required></label>
+                  <label>Labels<input name="labels" value="self-hosted,linux,docker" required></label>
+                  <label>Minimum<input name="min" type="number" min="0" value="0" required></label>
+                  <label>Maximum<input name="max" type="number" min="0" value="5" required></label>
+                  <label>CPU cores<input name="cpu" type="number" min="0.1" step="0.1" value="4" required></label>
+                  <label>Memory<input name="memory" value="8g" required></label>
+                  <label>Runner image<input name="image" placeholder="Default image"></label>
+                  <label>Docker access<select name="docker_mode"><option value="socket">Docker socket</option><option value="none">No Docker</option></select></label>
+                  <div class="form-submit"><button type="submit">Save pool</button></div>
+                </form>
+                <details class="subtle-details yaml-settings">
+                  <summary>Import or export YAML</summary>
+                  <textarea id="pool-yaml" class="code-editor" spellcheck="false" aria-label="Pool YAML"></textarea>
+                  <div class="actions"><button id="export-pools" class="secondary" type="button">Export</button><button id="import-pools" type="button">Import and replace</button></div>
+                </details>
+              </div>
+            </section>
+
+            <div class="settings-grid">
+              <section class="card settings-card">
+                <div class="settings-row"><div class="settings-copy"><h2>API tokens</h2><p>Tokens for scripts and monitoring.</p></div></div>
+                <div class="settings-body">
+                  <form id="token-form" class="stack-form">
+                    <input name="name" placeholder="Token name" aria-label="Token name" required>
+                    <div class="inline-form"><select name="scope" aria-label="Token scope"><option value="read">Read-only</option><option value="metrics">Metrics only</option><option value="manage">Full management</option></select><input name="expires_in_days" type="number" min="1" max="3650" placeholder="Expiry in days" aria-label="Token expiry in days"><button type="submit">Create</button></div>
+                  </form>
+                  <div id="new-token"></div><ul id="tokens" class="token-list"></ul>
+                </div>
+              </section>
+              <section class="card settings-card">
+                <div class="settings-row"><div class="settings-copy"><h2>Diagnostics</h2><p>Runner logs saved during cleanup.</p></div></div>
+                <div class="settings-body"><ul id="diagnostics" class="diagnostic-list"></ul></div>
+              </section>
+            </div>
+          </section>
+        </main>
+      </div>
+    </div>
     <div id="toasts" class="toast-area" aria-live="polite"></div>
   </body>
 </html>
