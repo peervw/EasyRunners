@@ -10,6 +10,7 @@ let repositoryBound = false;
 let refreshing = false;
 let dashboardCache = {};
 let lastRefreshFailure = '';
+let usagePeriod = '24h';
 
 function toast(message, kind = 'error') {
   const item = document.createElement('div');
@@ -26,10 +27,109 @@ function duration(seconds) {
   return hours ? `${hours}h ${minutes}m` : `${minutes}m`;
 }
 
+function formatBytes(bytes) {
+  const value = Math.max(0, Number(bytes) || 0);
+  if (value < 1024) return `${value} B`;
+  if (value < 1024 ** 2) return `${(value / 1024).toFixed(1)} KiB`;
+  return `${(value / 1024 ** 2).toFixed(1)} MiB`;
+}
+
+function renderUsage(usage) {
+  const period = usage?.[usagePeriod] || {};
+  document.querySelector('#usage-jobs').textContent = period.jobs ?? 0;
+  document.querySelector('#usage-minutes').textContent = `${period.runner_minutes ?? 0}m`;
+  document.querySelector('#usage-queue').textContent = period.average_queue_seconds == null
+    ? '—'
+    : duration(period.average_queue_seconds);
+  document.querySelector('#usage-failure').textContent = `${period.failure_rate ?? 0}%`;
+}
+
+function renderSetupChecklist(github, readiness, history) {
+  const panel = document.querySelector('#setup-checklist');
+  const passwordReady = panel.dataset.passwordReady === 'true';
+  const webhookEnabled = Boolean(github.connection?.webhook_enabled);
+  const steps = [
+    ['Administrator password', passwordReady],
+    ['GitHub App connected', Boolean(github.installed)],
+    ['Webhook received', Boolean(github.installed && (!webhookEnabled || readiness.checks?.webhook?.ok))],
+    ['First job completed', history.length > 0],
+  ];
+  panel.hidden = steps.every(([, done]) => done);
+  document.querySelector('#setup-checklist-items').innerHTML = steps.map(([label, done]) =>
+    `<div class="checklist-item ${done ? 'done' : ''}"><span class="checklist-mark" aria-hidden="true">${done ? '✓' : ''}</span><span>${esc(label)}</span></div>`,
+  ).join('');
+}
+
+function renderVersions(versions) {
+  const manager = versions.manager || 'unknown';
+  const runner = versions.runner || 'unknown';
+  document.querySelector('#version').textContent = `EasyRunners ${manager} · Runner ${runner}`;
+  document.querySelector('#manager-version').textContent = versions.manager_update_available
+    ? `${manager} → ${versions.latest_manager}`
+    : manager;
+  document.querySelector('#runner-version').textContent = versions.runner_update_available
+    ? `${runner} → ${versions.latest_runner}`
+    : runner;
+  const available = Boolean(versions.update_available);
+  const badge = document.querySelector('#update-badge');
+  badge.textContent = available ? 'Update available' : 'Up to date';
+  badge.className = `badge ${available ? 'warning' : 'online'}`;
+  document.querySelector('#update-summary').textContent = available
+    ? 'Review the available versions before rebuilding.'
+    : 'No newer release was found.';
+  document.querySelector('#update-command').textContent = versions.source_update_command
+    || 'git pull --ff-only && docker compose up -d --build';
+  document.querySelector('#update-links').innerHTML = [
+    versions.manager_release_url ? `<a href="${esc(versions.manager_release_url)}" target="_blank" rel="noopener">EasyRunners releases</a>` : '',
+    versions.runner_release_url ? `<a href="${esc(versions.runner_release_url)}" target="_blank" rel="noopener">Runner releases</a>` : '',
+  ].filter(Boolean).join('<span class="muted">·</span>');
+}
+
+function poolHealth(name, pool, status, readiness) {
+  const active = pool.starting + pool.idle + pool.busy;
+  const imageAvailable = readiness.checks?.runner_images?.detail?.[name];
+  if (!status.last_reconcile) return ['Checking', '', 'Waiting for the first reconciliation'];
+  if (pool.last_error) return ['Error', 'error', pool.last_error];
+  if (status.docker !== 'connected') return ['Docker offline', 'error', 'Docker Engine is unavailable'];
+  if (imageAvailable === false) return ['Image missing', 'error', 'The configured runner image was not found'];
+  if (pool.queued && status.github !== 'connected') return ['GitHub offline', 'error', 'GitHub is unavailable'];
+  if (pool.queued && active >= pool.max) return ['At capacity', 'warning', `Maximum ${pool.max} runners`];
+  if (pool.starting) return ['Starting', 'warning', 'A runner is registering'];
+  if (pool.queued) return ['Scaling', 'warning', 'Capacity is being created'];
+  return ['Healthy', 'healthy', 'No current issues'];
+}
+
 function orderedLabels(labels) {
-  const values = [...new Set((labels || []).map(label => String(label).toLowerCase()))];
-  const builtins = ['self-hosted', 'linux', 'x64', 'arm64', 'arm'];
+  const architectureLabels = new Set(['x64', 'arm64', 'arm']);
+  const values = [...new Set((labels || []).map(label => String(label).toLowerCase()))]
+    .filter(label => !architectureLabels.has(label));
+  const builtins = ['self-hosted', 'linux'];
   return [...builtins.filter(label => values.includes(label)), ...values.filter(label => !builtins.includes(label)).sort()];
+}
+
+const viewMeta = {
+  overview: ['Dashboard', 'Runner status and capacity'],
+  activity: ['Activity', 'Runners and workflow jobs'],
+  settings: ['Settings', 'GitHub, pools, and access'],
+};
+
+function selectAppView(name, updateHistory = true) {
+  if (!viewMeta[name]) name = 'overview';
+  document.querySelectorAll('[data-view-panel]').forEach(panel => {
+    panel.hidden = panel.dataset.viewPanel !== name;
+  });
+  document.querySelectorAll('.main-nav [data-view]').forEach(item => {
+    const active = item.dataset.view === name;
+    item.classList.toggle('active', active);
+    if (active) item.setAttribute('aria-current', 'page');
+    else item.removeAttribute('aria-current');
+  });
+  document.querySelector('#view-title').textContent = viewMeta[name][0];
+  document.querySelector('#view-description').textContent = viewMeta[name][1];
+  document.title = `${viewMeta[name][0]} · EasyRunners`;
+  if (updateHistory && window.location.hash !== `#${name}`) {
+    window.history.pushState({view: name}, '', `#${name}`);
+  }
 }
 
 function updateRunsOn() {
@@ -74,11 +174,11 @@ function renderReadiness(readiness) {
   badge.textContent = readiness.ready ? 'Ready' : 'Needs attention';
   badge.className = `badge ${readiness.ready ? 'online' : 'offline'}`;
   document.querySelector('#readiness').innerHTML = Object.entries(readiness.checks).map(([name, check]) => {
-    const detail = typeof check.detail === 'object'
+    const detail = check.detail && typeof check.detail === 'object'
       ? Object.entries(check.detail).map(([pool, ok]) => `${pool}: ${ok ? 'found' : 'missing'}`).join(', ')
-      : (check.detail || 'Not observed yet');
+      : (check.detail || 'No data');
     const ok = check.ok || check.optional;
-    return `<div class="check-item ${ok ? 'ok' : 'bad'}"><strong>${check.ok ? '✓' : (check.optional ? '○' : '✕')} ${esc(name.replaceAll('_', ' '))}</strong><p class="muted">${esc(detail)}</p></div>`;
+    return `<div class="check-item ${ok ? 'ok' : 'bad'}"><span class="check-dot" aria-hidden="true">${check.ok ? '✓' : (check.optional ? '○' : '✕')}</span><div><strong>${esc(name.replaceAll('_', ' '))}</strong><p class="muted">${esc(detail)}</p></div></div>`;
   }).join('');
 }
 
@@ -90,6 +190,7 @@ async function refresh() {
       status: '/api/status', runners: '/api/runners', jobs: '/api/jobs',
       history: '/api/history?limit=50', tokens: '/api/auth/tokens', github: '/api/github',
       readiness: '/api/readiness', versions: '/api/version', diagnostics: '/api/diagnostics',
+      usage: '/api/usage', diagnosticSettings: '/api/settings/diagnostics',
     };
     const entries = Object.entries(requests);
     const results = await Promise.allSettled(entries.map(([, url]) => json(url)));
@@ -100,8 +201,8 @@ async function refresh() {
       else failures.push(`${name}: ${result.reason?.message || result.reason}`);
     });
     const failureMessage = failures.join(' · ');
-    if (failureMessage && failureMessage !== lastRefreshFailure) toast(`Some dashboard data is stale: ${failureMessage}`);
-    if (!failureMessage && lastRefreshFailure) toast('Dashboard data is live again.', 'success');
+    if (failureMessage && failureMessage !== lastRefreshFailure) toast(`Some data could not be refreshed: ${failureMessage}`);
+    if (!failureMessage && lastRefreshFailure) toast('Connection restored.', 'success');
     lastRefreshFailure = failureMessage;
     const status = dashboardCache.status;
     if (!status) throw new Error('Status has not loaded yet.');
@@ -113,25 +214,41 @@ async function refresh() {
     const readiness = dashboardCache.readiness || {ready: false, checks: {}};
     const versions = dashboardCache.versions || {manager: 'unknown', runner: 'unknown'};
     const diagnostics = dashboardCache.diagnostics || [];
+    const usage = dashboardCache.usage || {};
+    const diagnosticSettings = dashboardCache.diagnosticSettings || {
+      capture_enabled: true, cleanup_enabled: true, retention_days: 7,
+      file_count: 0, total_size: 0, oldest_at: null,
+    };
+    const poolEntries = Object.entries(status.pools);
+    const busyCount = poolEntries.reduce((total, [, pool]) => total + pool.busy, 0);
+    const queuedCount = jobs.filter(job => job.status === 'queued').length;
+    document.querySelector('#metric-runners').textContent = runners.length;
+    document.querySelector('#metric-busy').textContent = busyCount;
+    document.querySelector('#metric-queued').textContent = queuedCount;
+    document.querySelector('#metric-pools').textContent = poolEntries.length;
+    const headerHealth = document.querySelector('.sidebar-footer');
+    const headerHealthText = document.querySelector('#header-health');
+    const healthy = readiness.ready && status.docker === 'connected';
+    headerHealth.className = `sidebar-footer ${healthy ? 'healthy' : 'unhealthy'}`;
+    headerHealthText.textContent = healthy ? 'Ready' : 'Needs attention';
     const badge = document.querySelector('#github-badge');
     const githubState = github.installed ? status.github : (github.configured ? 'installation pending' : 'not configured');
     badge.textContent = githubState;
     badge.className = `badge ${status.github === 'connected' ? 'online' : 'offline'}`;
     const repositoryCount = github.repositories?.length ?? github.connection?.repositories_count ?? 0;
-    const mode = github.repository_bound ? 'repository-isolated runners' : 'shared organization runners';
+    const mode = github.repository_bound ? 'Repository runners' : 'Organization runners';
     document.querySelector('#connection-details').innerHTML = github.connection
-      ? `<strong>${esc(github.connection.owner)} · ${esc(mode)}</strong>`
-        + `<p class="muted">App: ${esc(github.connection.app_slug || 'manual')} · Installation: ${esc(github.connection.installation_id || 'pending')} · ${github.connection.webhook_enabled ? 'webhook + polling' : 'polling only'} · ${repositoryCount} ${repositoryCount === 1 ? 'repository' : 'repositories'}${github.rate_limit?.remaining == null ? '' : ` · GitHub API ${github.rate_limit.remaining} remaining`}</p>`
-      : '<p class="muted">Paste your GitHub account or organization URL below. Repository access is selected on GitHub.</p>';
+      ? `<div class="connection-identity"><span class="provider-mark" aria-hidden="true">GH</span><div><strong>${esc(github.connection.owner)}</strong><small>${esc(mode)} · ${esc(github.connection.app_slug || 'manual app')} · ${github.connection.webhook_enabled ? 'Webhooks enabled' : 'Polling only'} · ${repositoryCount} ${repositoryCount === 1 ? 'repository' : 'repositories'}${github.rate_limit?.remaining == null ? '' : ` · ${github.rate_limit.remaining} API requests left`}</small></div></div>`
+      : '<p class="help-text">No GitHub App is connected.</p>';
     const selection = github.connection?.repository_selection;
     const accessWarning = selection === 'all'
-      ? '<p class="access-warning">GitHub granted this App access to all repositories. EasyRunners can serve matching jobs from any of them. Select only the repositories you trust.</p>'
+      ? '<p class="access-warning">This App can access all repositories. Restrict the installation on GitHub if needed.</p>'
       : '';
     const repositoryErrors = [github.metadata_error, github.repositories_error].filter(Boolean);
     const repositoryList = github.repositories?.length
       ? `<div class="repository-list">${github.repositories.map(repository => `<span class="label">${esc(repository)}</span>`).join('')}</div>`
       : (github.repository_bound
-        ? `<p class="access-warning">No repositories could be loaded. ${repositoryErrors.length ? esc(repositoryErrors.join(' · ')) : 'Check the App repository access on GitHub.'}</p>`
+        ? `<p class="access-warning">Repositories could not be loaded. ${repositoryErrors.length ? esc(repositoryErrors.join(' · ')) : 'Check the App installation on GitHub.'}</p>`
         : '');
     const configure = github.configure_url
       ? `<a href="${esc(github.configure_url)}" target="_blank" rel="noopener">Manage repository access on GitHub</a>`
@@ -144,31 +261,43 @@ async function refresh() {
     document.querySelector('#updated').textContent = status.last_reconcile
       ? `Updated ${new Date(status.last_reconcile).toLocaleTimeString()}`
       : '';
-    document.querySelector('#version').textContent = versions.update_available
-      ? `Runner ${versions.runner} · ${versions.latest_runner} available`
-      : `EasyRunners ${versions.manager} · Runner ${versions.runner}`;
+    renderVersions(versions);
     renderReadiness(readiness);
+    renderUsage(usage);
+    renderSetupChecklist(github, readiness, history);
 
-    poolConfigs = Object.fromEntries(Object.entries(status.pools).map(([name, pool]) => [name, pool.config]));
-    document.querySelector('#pools').innerHTML = Object.entries(status.pools).map(([name, pool]) => `
-      <article class="card">
-        <div class="section-heading"><h2>${esc(name)}</h2><span>${pool.min}–${pool.max}</span></div>
-        <div class="stats">
-          <div class="stat"><b>${pool.queued}</b><span>Queued</span></div>
-          <div class="stat"><b>${pool.starting}</b><span>Starting</span></div>
-          <div class="stat"><b>${pool.idle}</b><span>Idle</span></div>
-          <div class="stat"><b>${pool.busy}</b><span>Busy</span></div>
+    poolConfigs = Object.fromEntries(poolEntries.map(([name, pool]) => [name, pool.config]));
+    document.querySelector('#pools').innerHTML = poolEntries.map(([name, pool]) => {
+      const active = pool.starting + pool.idle + pool.busy;
+      const capacity = pool.max ? Math.min(100, Math.round((active / pool.max) * 100)) : 0;
+      const labels = orderedLabels(pool.labels);
+      const [healthLabel, healthClass, healthDetail] = poolHealth(name, pool, status, readiness);
+      return `
+      <article class="pool-card">
+        <div class="pool-heading">
+          <div class="pool-title"><span class="pool-avatar">${esc(name.slice(0, 2))}</span><div><h3>${esc(name)}</h3><small>${pool.config.docker_mode === 'socket' ? 'Docker socket' : 'No Docker access'} · min ${pool.min}, max ${pool.max}</small></div></div>
+          <div class="pool-heading-actions"><span class="badge ${healthClass}" title="${esc(healthDetail)}">${esc(healthLabel)}</span><div class="pool-card-actions"><button class="ghost compact edit-pool" data-pool="${esc(name)}" title="Edit pool">Edit</button><button class="ghost compact delete-pool" data-pool="${esc(name)}" title="Delete pool">Delete</button></div></div>
         </div>
-        <div class="labels">${pool.labels.map(label => `<span class="label">${esc(label)}</span>`).join('')}</div>
-        ${pool.manual_floors?.length ? `<p class="muted">${pool.manual_floors.map(floor => `${esc(floor.repository || 'organization')}: ${floor.desired} pre-warmed`).join(' · ')}</p>` : ''}
-        <form class="scale-form inline-form" data-pool="${esc(name)}">
-          ${repositoryBound ? `<select name="repository" aria-label="Pre-warm repository" required>${repositoryOptions()}</select>` : ''}
-          <input name="desired" type="number" min="0" max="${pool.max}" value="0" aria-label="Desired pre-warm">
-          <input name="ttl" type="number" min="30" value="600" aria-label="TTL seconds">
-          <button ${repositoryBound && !githubRepositories.length ? 'disabled title="No GitHub repositories are available"' : ''}>Pre-warm</button>
-        </form>
-        <div class="actions"><button class="secondary compact edit-pool" data-pool="${esc(name)}">Edit</button><button class="secondary compact delete-pool" data-pool="${esc(name)}">Delete</button></div>
-      </article>`).join('');
+        <div class="pool-stats">
+          <div class="pool-stat"><strong>${pool.queued}</strong><span>Queued</span></div>
+          <div class="pool-stat"><strong>${pool.starting}</strong><span>Starting</span></div>
+          <div class="pool-stat"><strong>${pool.idle}</strong><span>Idle</span></div>
+          <div class="pool-stat"><strong>${pool.busy}</strong><span>Busy</span></div>
+        </div>
+        <progress class="capacity-track" value="${active}" max="${pool.max || 1}" title="${active} of ${pool.max} runners active">${capacity}%</progress>
+        <div class="labels">${labels.map(label => `<span class="label">${esc(label)}</span>`).join('')}</div>
+        ${pool.manual_floors?.length ? `<p class="manual-floor">${pool.manual_floors.map(floor => `${esc(floor.repository || 'organization')}: ${floor.desired} pre-warmed`).join(' · ')}</p>` : ''}
+        <details class="pool-controls">
+          <summary>Pre-warm</summary>
+          <form class="scale-form" data-pool="${esc(name)}">
+            ${repositoryBound ? `<label>Repository<select name="repository" required>${repositoryOptions()}</select></label>` : ''}
+            <label>Runners<input name="desired" type="number" min="0" max="${pool.max}" value="0"></label>
+            <label>TTL (sec)<input name="ttl" type="number" min="30" value="600"></label>
+            <button ${repositoryBound && !githubRepositories.length ? 'disabled title="No GitHub repositories are available"' : ''}>Apply</button>
+          </form>
+        </details>
+      </article>`;
+    }).join('');
 
     const quickstartPool = document.querySelector('#quickstart-pool');
     const selectedQuickstartPool = quickstartPool.value;
@@ -197,19 +326,33 @@ async function refresh() {
 
     document.querySelector('#runner-count').textContent = runners.length;
     document.querySelector('#runners').innerHTML = runners.length
-      ? runners.map(runner => `<tr><td>${esc(runner.name)}</td><td>${esc(runner.repository || status.target || 'organization')}</td><td>${esc(runner.pool)}</td><td><span class="badge ${esc(runner.state)}">${esc(runner.state)}</span></td><td>${duration(runner.uptime_seconds)}</td><td><code>${esc(runner.container_id.slice(0, 12))}</code></td><td>${runner.labels.map(label => `<span class="label">${esc(label)}</span>`).join(' ')}</td></tr>`).join('')
-      : '<tr><td colspan="7" class="muted">No managed runners.</td></tr>';
+      ? runners.map(runner => `<tr><td>${esc(runner.name)}</td><td>${esc(runner.repository || status.target || 'organization')}</td><td>${esc(runner.pool)}</td><td><span class="badge ${esc(runner.state)}">${esc(runner.state)}</span></td><td>${duration(runner.uptime_seconds)}</td><td><code>${esc(runner.container_id.slice(0, 12))}</code></td><td>${orderedLabels(runner.labels).map(label => `<span class="label">${esc(label)}</span>`).join(' ')}</td></tr>`).join('')
+      : '<tr><td colspan="7" class="empty-cell">No active runners.</td></tr>';
     document.querySelector('#job-count').textContent = jobs.length;
     document.querySelector('#jobs').innerHTML = jobs.length
-      ? jobs.map(job => `<tr><td>${esc(job.name || job.id)}${job.waiting_reason ? `<small class="job-reason">${esc(job.waiting_reason)}</small>` : ''}</td><td>${esc(job.repository)}</td><td>${job.pool ? esc(job.pool) : `<span class="unmatched">No pool matches [${job.labels.map(esc).join(', ')}]</span> <button class="secondary compact copy-replacement">Copy replacement</button>`}</td><td><span class="badge ${esc(job.status)}">${esc(job.status)}</span></td><td>${esc(job.runner_name || '—')}</td><td>${job.queued_at ? new Date(job.queued_at).toLocaleString() : '—'}</td></tr>`).join('')
-      : '<tr><td colspan="6" class="muted">No queued or active jobs.</td></tr>';
+      ? jobs.map(job => `<tr><td>${esc(job.name || job.id)}</td><td>${esc(job.repository)}</td><td>${job.pool ? esc(job.pool) : `<span class="unmatched">No pool matches [${job.labels.map(esc).join(', ')}]</span> <button class="secondary compact copy-replacement">Copy replacement</button>`}</td><td><span class="badge ${esc(job.status)}">${esc(job.status)}</span>${job.waiting_reason ? `<small class="job-reason">${esc(job.waiting_reason)}</small>` : ''}</td><td>${esc(job.runner_name || '—')}</td><td>${job.queued_at ? new Date(job.queued_at).toLocaleString() : '—'}</td></tr>`).join('')
+      : '<tr><td colspan="6" class="empty-cell">No queued or active jobs.</td></tr>';
+    document.querySelector('#history-count').textContent = history.length;
     document.querySelector('#history').innerHTML = history.length
-      ? history.map(job => `<tr><td>${esc(job.name || job.id)}</td><td>${esc(job.repository)}</td><td>${esc(job.pool || '—')}</td><td>${esc(job.conclusion || '—')}</td><td>${job.completed_at ? new Date(job.completed_at).toLocaleString() : '—'}</td></tr>`).join('')
-      : '<tr><td colspan="5" class="muted">No completed jobs observed.</td></tr>';
-    document.querySelector('#tokens').innerHTML = tokens.map(token => `<li><span>${esc(token.name)} <small class="muted">${esc(token.scope)} · ${token.expires_at ? `expires ${new Date(token.expires_at).toLocaleDateString()}` : 'no expiry'} · ${esc(token.id)}</small></span><button class="secondary compact revoke-token" data-id="${esc(token.id)}">Revoke</button></li>`).join('');
+      ? history.map(job => `<tr><td>${esc(job.name || job.id)}</td><td>${esc(job.repository)}</td><td>${esc(job.pool || '—')}</td><td><span class="badge ${esc(job.conclusion || '')}">${esc(job.conclusion || '—')}</span></td><td>${job.completed_at ? new Date(job.completed_at).toLocaleString() : '—'}</td></tr>`).join('')
+      : '<tr><td colspan="5" class="empty-cell">No job history.</td></tr>';
+    document.querySelector('#tokens').innerHTML = tokens.length
+      ? tokens.map(token => `<li><span>${esc(token.name)}<small>${esc(token.scope)} · ${token.expires_at ? `expires ${new Date(token.expires_at).toLocaleDateString()}` : 'no expiry'} · ${esc(token.id)}</small></span><button class="ghost compact revoke-token" data-id="${esc(token.id)}">Revoke</button></li>`).join('')
+      : '<li class="muted">No API tokens.</li>';
     document.querySelector('#diagnostics').innerHTML = diagnostics.length
       ? diagnostics.map(item => `<li><a href="/api/diagnostics/${encodeURIComponent(item.name)}">${esc(item.name)}</a><small class="muted">${Math.ceil(item.size / 1024)} KiB · ${new Date(item.modified_at).toLocaleString()}</small></li>`).join('')
-      : '<li class="muted">No runner diagnostics have been archived yet.</li>';
+      : '<li class="muted">No saved diagnostics.</li>';
+    document.querySelector('#diagnostic-summary').textContent = diagnosticSettings.file_count
+      ? `${diagnosticSettings.file_count} files · ${formatBytes(diagnosticSettings.total_size)} · oldest ${new Date(diagnosticSettings.oldest_at).toLocaleDateString()}`
+      : 'No disk space used.';
+    const diagnosticForm = document.querySelector('#diagnostic-settings-form');
+    if (!diagnosticForm.dataset.dirty) {
+      diagnosticForm.capture_enabled.checked = diagnosticSettings.capture_enabled;
+      diagnosticForm.cleanup_enabled.checked = diagnosticSettings.cleanup_enabled;
+      diagnosticForm.retention_days.value = String(diagnosticSettings.retention_days);
+    }
+    diagnosticForm.retention_days.disabled = !diagnosticForm.cleanup_enabled.checked;
+    document.querySelector('#clear-diagnostics').disabled = diagnosticSettings.file_count === 0;
     bindDynamic();
   } catch (error) {
     toast(`Dashboard refresh failed: ${error.message || error}`);
@@ -219,6 +362,7 @@ async function refresh() {
 }
 
 function fillPool(name = 'default', config = null) {
+  selectAppView('settings');
   const form = document.querySelector('#pool-form');
   const value = config || {labels: ['self-hosted', 'linux', name], min: 0, max: 5, cpu: 4, memory: '8g', docker_mode: 'socket'};
   form.pool_name.value = name;
@@ -299,6 +443,31 @@ document.querySelector('#token-form')?.addEventListener('submit', async event =>
   event.target.reset();
   refresh();
 });
+document.querySelector('#diagnostic-settings-form')?.addEventListener('input', event => {
+  event.currentTarget.dataset.dirty = 'true';
+  event.currentTarget.retention_days.disabled = !event.currentTarget.cleanup_enabled.checked;
+});
+document.querySelector('#diagnostic-settings-form')?.addEventListener('submit', async event => {
+  event.preventDefault();
+  const form = event.currentTarget;
+  const result = await action(() => json('/api/settings/diagnostics', {
+    method: 'PUT', headers, body: JSON.stringify({
+      capture_enabled: form.capture_enabled.checked,
+      cleanup_enabled: form.cleanup_enabled.checked,
+      retention_days: Number(form.retention_days.value),
+    }),
+  }), 'Diagnostic settings saved.');
+  if (result) {
+    delete form.dataset.dirty;
+    dashboardCache.diagnosticSettings = result;
+    refresh();
+  }
+});
+document.querySelector('#clear-diagnostics')?.addEventListener('click', async () => {
+  if (!window.confirm('Delete all saved runner diagnostics?')) return;
+  const result = await action(() => json('/api/diagnostics', {method: 'DELETE', headers}), 'Diagnostics deleted.');
+  if (result) refresh();
+});
 document.querySelector('#github-setup')?.addEventListener('submit', async event => {
   event.preventDefault();
   const progress = document.querySelector('#setup-progress');
@@ -355,6 +524,60 @@ document.querySelector('#copy-runs-on')?.addEventListener('click', async () => {
   const content = document.querySelector('#runs-on-line').textContent;
   await action(() => navigator.clipboard.writeText(content), 'runs-on line copied.');
 });
+document.querySelector('#copy-update-command')?.addEventListener('click', async () => {
+  const content = document.querySelector('#update-command').textContent;
+  await action(() => navigator.clipboard.writeText(content), 'Update command copied.');
+});
+document.querySelector('#setup-settings')?.addEventListener('click', () => selectAppView('settings'));
 
+const themeSelect = document.querySelector('#theme-select');
+if (themeSelect && window.EasyRunnersTheme) {
+  themeSelect.value = window.EasyRunnersTheme.preference();
+  themeSelect.addEventListener('change', () => window.EasyRunnersTheme.set(themeSelect.value));
+}
+
+document.querySelectorAll('[data-usage-period]').forEach(button => {
+  button.addEventListener('click', () => {
+    usagePeriod = button.dataset.usagePeriod;
+    document.querySelectorAll('[data-usage-period]').forEach(item => {
+      item.classList.toggle('active', item === button);
+    });
+    renderUsage(dashboardCache.usage || {});
+  });
+});
+
+function selectActivityTab(name) {
+  document.querySelectorAll('[data-activity-tab]').forEach(tab => {
+    const active = tab.dataset.activityTab === name;
+    tab.classList.toggle('active', active);
+    tab.setAttribute('aria-selected', String(active));
+    tab.tabIndex = active ? 0 : -1;
+  });
+  document.querySelectorAll('[data-activity-panel]').forEach(panel => {
+    panel.hidden = panel.dataset.activityPanel !== name;
+  });
+}
+
+document.querySelectorAll('[data-activity-tab]').forEach(tab => {
+  tab.addEventListener('click', () => selectActivityTab(tab.dataset.activityTab));
+  tab.addEventListener('keydown', event => {
+    if (!['ArrowLeft', 'ArrowRight'].includes(event.key)) return;
+    const tabs = [...document.querySelectorAll('[data-activity-tab]')];
+    const direction = event.key === 'ArrowRight' ? 1 : -1;
+    const target = tabs[(tabs.indexOf(tab) + direction + tabs.length) % tabs.length];
+    target.focus();
+    selectActivityTab(target.dataset.activityTab);
+  });
+});
+
+document.querySelectorAll('[data-view]').forEach(item => {
+  item.addEventListener('click', event => {
+    event.preventDefault();
+    selectAppView(item.dataset.view);
+  });
+});
+window.addEventListener('popstate', () => selectAppView(window.location.hash.slice(1), false));
+
+selectAppView(window.location.hash.slice(1) || 'overview', false);
 refresh();
 setInterval(refresh, 5000);

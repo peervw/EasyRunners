@@ -8,6 +8,7 @@ import pytest
 from fastapi.testclient import TestClient
 
 import runner_manager.main as main_module
+from runner_manager.database import Database
 from runner_manager.main import create_app
 from runner_manager.models import NATIVE_ARCHITECTURE, GitHubSetupRequest
 
@@ -80,7 +81,9 @@ def test_login_dashboard_csrf_and_api_token(client) -> None:
     assert dashboard.status_code == 200
     assert dashboard.headers["Cache-Control"] == "no-store"
     assert "GitHub account or organization URL" in dashboard.text
-    assert "Advanced settings" in dashboard.text
+    assert 'aria-label="Main navigation"' in dashboard.text
+    assert "Runner pools" in dashboard.text
+    assert "GitHub integration" in dashboard.text
     asset_version = app.state.templates.env.globals["asset_version"]
     assert f'/static/app.js?v={asset_version}' in dashboard.text
     versioned_asset = test_client.get(f"/static/app.js?v={asset_version}")
@@ -273,13 +276,74 @@ def test_diagnostic_archives_are_authenticated_and_downloadable(client) -> None:
     (directory / "linked.log").symlink_to(directory / "runner-one.tar")
     assert test_client.get("/api/diagnostics").status_code == 401
 
-    _, _ = login(test_client, app)
+    _, csrf = login(test_client, app)
     response = test_client.get("/api/diagnostics")
     assert [item["name"] for item in response.json()] == ["runner-one.tar"]
+    settings_response = test_client.get("/api/settings/diagnostics")
+    settings_body = settings_response.json()
+    assert settings_body.pop("oldest_at")
+    assert settings_body == {
+        "capture_enabled": True,
+        "cleanup_enabled": True,
+        "retention_days": 7,
+        "file_count": 1,
+        "total_size": 7,
+    }
+    updated = test_client.put(
+        "/api/settings/diagnostics",
+        headers={"X-CSRF-Token": csrf},
+        json={"capture_enabled": False, "cleanup_enabled": False, "retention_days": 14},
+    )
+    assert updated.status_code == 200
+    assert updated.json()["capture_enabled"] is False
+    assert updated.json()["cleanup_enabled"] is False
+    assert app.state.database.get_setting("diagnostic_settings")
     assert test_client.get("/api/diagnostics/runner-one.tar").content == b"archive"
     assert test_client.get("/api/diagnostics/manager-secret.txt").status_code == 404
     assert test_client.get("/api/diagnostics/linked.log").status_code == 404
     assert test_client.get("/api/diagnostics/%2E%2E%2Fstate.sqlite3").status_code == 404
+    cleared = test_client.delete(
+        "/api/diagnostics", headers={"X-CSRF-Token": csrf}
+    )
+    assert cleared.json() == {"deleted": 1, "released_bytes": 7}
+    assert (directory / "manager-secret.txt").exists()
+    assert (directory / "linked.log").is_symlink()
+
+
+def test_usage_and_update_status(client, monkeypatch) -> None:
+    test_client, app = client
+    _, _ = login(test_client, app)
+
+    async def latest_runner():
+        return "9.0.0"
+
+    async def latest_manager():
+        return "9.0.0"
+
+    monkeypatch.setattr(app.state.github, "latest_runner_version", latest_runner)
+    monkeypatch.setattr(app.state.github, "latest_manager_version", latest_manager)
+    assert set(test_client.get("/api/usage").json()) == {"24h", "7d"}
+    versions = test_client.get("/api/version").json()
+    assert versions["runner_update_available"] is True
+    assert versions["manager_update_available"] is True
+    assert versions["source_update_command"].startswith("git pull --ff-only")
+
+
+def test_saved_diagnostic_settings_load_on_restart(settings, monkeypatch) -> None:
+    database = Database(settings.data_dir / "easyrunners.sqlite3")
+    database.set_setting(
+        "diagnostic_settings",
+        json.dumps(
+            {"capture_enabled": False, "cleanup_enabled": False, "retention_days": 30}
+        ),
+    )
+    database.close()
+    monkeypatch.setattr(main_module, "DockerRunnerManager", NoopDocker)
+    app = create_app(settings, start_scheduler=False)
+    with TestClient(app):
+        assert app.state.settings.runner_log_capture_enabled is False
+        assert app.state.settings.runner_log_cleanup_enabled is False
+        assert app.state.settings.runner_log_retention_days == 30
 
 
 def test_runner_request_carries_repository_and_pool(client, monkeypatch) -> None:

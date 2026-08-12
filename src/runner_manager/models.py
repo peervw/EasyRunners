@@ -165,3 +165,9 @@ class GitHubConnectRequest(BaseModel):
 
 class PoolYamlRequest(BaseModel):
     yaml: str = Field(min_length=1, max_length=100_000)
+
+
+class DiagnosticSettings(BaseModel):
+    capture_enabled: bool = True
+    cleanup_enabled: bool = True
+    retention_days: int = Field(default=7, ge=1, le=365)

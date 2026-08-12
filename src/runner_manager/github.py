@@ -296,6 +296,7 @@ class GitHubClient:
         self._owns_client = client is None
         self.auth = GitHubAuth(settings, store, self.http)
         self._latest_runner: tuple[float, str | None] = (0.0, None)
+        self._latest_manager: tuple[float, str | None] = (0.0, None)
         self._repositories: tuple[float, list[str]] = (0.0, [])
         self._installation_metadata_at = 0.0
         self._rate_limited_until = 0.0
@@ -791,6 +792,23 @@ class GitHubClient:
         except Exception:
             version = None
         self._latest_runner = (time.monotonic(), version)
+        return version
+
+    async def latest_manager_version(self) -> str | None:
+        cached_at, version = self._latest_manager
+        if time.monotonic() - cached_at < 3600:
+            return version
+        try:
+            response = await self.http.get(
+                f"{self.settings.github_api_url}/repos/"
+                f"{self.settings.manager_repository}/releases/latest",
+                headers={"Accept": "application/vnd.github+json", "User-Agent": "EasyRunners/0.1"},
+            )
+            response.raise_for_status()
+            version = str(response.json().get("tag_name", "")).removeprefix("v") or None
+        except Exception:
+            version = None
+        self._latest_manager = (time.monotonic(), version)
         return version
 
 

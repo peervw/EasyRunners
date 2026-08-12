@@ -586,6 +586,7 @@ class Scheduler:
                 "max": config.max,
                 "labels": sorted(config.effective_labels),
                 "config": config.model_dump(mode="json"),
+                "last_error": self._pool_errors.get(name),
                 "manual_floor": sum(floor.desired for _, floor in pool_manual_floors),
                 "manual_floor_expires_at": min(
                     (floor.expires_at.isoformat() for _, floor in pool_manual_floors),

@@ -4,21 +4,24 @@
     <meta charset="utf-8">
     <meta name="viewport" content="width=device-width,initial-scale=1">
     <title>Sign in · EasyRunners</title>
+    <script src="/static/theme.js?v={{ asset_version }}"></script>
     <link rel="stylesheet" href="/static/app.css?v={{ asset_version }}">
   </head>
   <body class="login-page">
-    <main class="login-card">
-      <div class="brand-mark">ER</div>
-      <h1>EasyRunners</h1>
-      <p class="muted">Ephemeral GitHub Actions capacity</p>
-      {% if error %}<div class="alert danger">{{ error }}</div>{% endif %}
+    <main class="login-shell">
+      <div class="brand login-brand"><span class="brand-mark" aria-hidden="true">E</span><span>EasyRunners</span></div>
+      <div class="login-heading">
+        <h1>Sign in</h1>
+        <p>Enter your administrator password.</p>
+      </div>
+      {% if error %}<div class="alert danger" role="alert">{{ error }}</div>{% endif %}
       <form method="post" action="/auth/login">
         <input type="hidden" name="next_url" value="{{ next_url or '/' }}">
-        <label for="password">Administrator password</label>
+        <label for="password">Password</label>
         <input id="password" name="password" type="password" autocomplete="current-password" required autofocus>
         <button type="submit">Sign in</button>
       </form>
-      <p class="hint">On first boot, find the one-time password in <code>docker compose logs manager</code>.</p>
+      <p class="login-help">First login? Run <code>docker compose logs manager</code> to find the temporary password.</p>
     </main>
   </body>
 </html>

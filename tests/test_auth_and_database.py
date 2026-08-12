@@ -1,4 +1,5 @@
 import sqlite3
+from datetime import UTC, datetime, timedelta
 from pathlib import Path
 
 import pytest
@@ -120,4 +121,45 @@ def test_delivery_dedup_history_and_setup_state(auth_stack) -> None:
     database.create_setup_state("state", {"owner": "peer"})
     assert database.consume_setup_state("state") == {"owner": "peer"}
     assert database.consume_setup_state("state") is None
+    database.close()
+
+
+def test_usage_summary_calculates_recent_runtime_queue_and_failures(tmp_path: Path) -> None:
+    database = Database(tmp_path / "usage.sqlite3", history_limit=10)
+    now = datetime(2026, 8, 12, 12, tzinfo=UTC)
+    database.add_history(
+        1,
+        {
+            "id": 1,
+            "queued_at": (now - timedelta(minutes=31)).isoformat(),
+            "started_at": (now - timedelta(minutes=30)).isoformat(),
+            "completed_at": (now - timedelta(minutes=20)).isoformat(),
+            "conclusion": "success",
+        },
+    )
+    database.add_history(
+        2,
+        {
+            "id": 2,
+            "queued_at": (now - timedelta(days=2, minutes=5)).isoformat(),
+            "started_at": (now - timedelta(days=2, minutes=4)).isoformat(),
+            "completed_at": (now - timedelta(days=2)).isoformat(),
+            "conclusion": "failure",
+        },
+    )
+
+    usage = database.usage_summary(now)
+
+    assert usage["24h"] == {
+        "jobs": 1,
+        "runner_minutes": 10.0,
+        "average_queue_seconds": 60,
+        "failure_rate": 0.0,
+    }
+    assert usage["7d"] == {
+        "jobs": 2,
+        "runner_minutes": 14.0,
+        "average_queue_seconds": 60,
+        "failure_rate": 50.0,
+    }
     database.close()

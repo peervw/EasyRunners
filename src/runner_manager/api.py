@@ -25,6 +25,7 @@ from runner_manager.demand import DemandTracker
 from runner_manager.github import GitHubClient, GitHubConnectionStore
 from runner_manager.metrics import WEBHOOK_FAILURES
 from runner_manager.models import (
+    DiagnosticSettings,
     GitHubConnectRequest,
     GitHubScope,
     GitHubSetupRequest,
@@ -136,6 +137,39 @@ def _version_parts(value: str) -> tuple[int, ...]:
         return tuple(int(part) for part in value.split("."))
     except ValueError:
         return ()
+
+
+def _diagnostic_files(request: Request) -> list[Path]:
+    directory = request.app.state.settings.data_dir / "runner-logs"
+    if not directory.exists():
+        return []
+    return [
+        path
+        for path in directory.iterdir()
+        if path.is_file()
+        and not path.is_symlink()
+        and path.name.endswith((".tar", ".log"))
+    ]
+
+
+def _diagnostic_settings(request: Request) -> DiagnosticSettings:
+    settings = request.app.state.settings
+    return DiagnosticSettings(
+        capture_enabled=settings.runner_log_capture_enabled,
+        cleanup_enabled=settings.runner_log_cleanup_enabled,
+        retention_days=settings.runner_log_retention_days,
+    )
+
+
+def _diagnostic_summary(request: Request) -> dict[str, Any]:
+    files = _diagnostic_files(request)
+    oldest = min((path.stat().st_mtime for path in files), default=None)
+    return {
+        **_diagnostic_settings(request).model_dump(),
+        "file_count": len(files),
+        "total_size": sum(path.stat().st_size for path in files),
+        "oldest_at": datetime.fromtimestamp(oldest, UTC).isoformat() if oldest else None,
+    }
 
 
 def _login_redirect(request: Request) -> RedirectResponse:
@@ -359,20 +393,41 @@ async def api_history(
     return _database(request).list_history(max(1, min(limit, 500)))
 
 
+@router.get("/api/usage")
+async def api_usage(
+    request: Request, _: Annotated[AuthContext, Depends(require_auth)]
+) -> dict[str, dict[str, Any]]:
+    return _database(request).usage_summary()
+
+
+@router.get("/api/settings/diagnostics")
+async def api_diagnostic_settings(
+    request: Request, _: Annotated[AuthContext, Depends(require_auth)]
+) -> dict[str, Any]:
+    return _diagnostic_summary(request)
+
+
+@router.put("/api/settings/diagnostics")
+async def api_update_diagnostic_settings(
+    request: Request,
+    body: DiagnosticSettings,
+    _: Annotated[AuthContext, Depends(require_mutation)],
+) -> dict[str, Any]:
+    settings = request.app.state.settings
+    settings.runner_log_capture_enabled = body.capture_enabled
+    settings.runner_log_cleanup_enabled = body.cleanup_enabled
+    settings.runner_log_retention_days = body.retention_days
+    _database(request).set_setting("diagnostic_settings", body.model_dump_json())
+    if body.cleanup_enabled:
+        await request.app.state.docker.prune_logs()
+    return _diagnostic_summary(request)
+
+
 @router.get("/api/diagnostics")
 async def api_diagnostics(
     request: Request, _: Annotated[AuthContext, Depends(require_auth)]
 ) -> list[dict[str, Any]]:
-    directory = request.app.state.settings.data_dir / "runner-logs"
-    if not directory.exists():
-        return []
-    files = [
-        path
-        for path in directory.iterdir()
-        if path.is_file()
-        and not path.is_symlink()
-        and path.name.endswith((".tar", ".log"))
-    ]
+    files = _diagnostic_files(request)
     files.sort(key=lambda path: path.stat().st_mtime, reverse=True)
     return [
         {
@@ -382,6 +437,18 @@ async def api_diagnostics(
         }
         for path in files[:100]
     ]
+
+
+@router.delete("/api/diagnostics")
+async def api_clear_diagnostics(
+    request: Request,
+    _: Annotated[AuthContext, Depends(require_mutation)],
+) -> dict[str, int]:
+    files = _diagnostic_files(request)
+    released = sum(path.stat().st_size for path in files)
+    for path in files:
+        path.unlink()
+    return {"deleted": len(files), "released_bytes": released}
 
 
 @router.get("/api/diagnostics/{name}")
@@ -500,14 +567,29 @@ async def api_version(
     except PackageNotFoundError:
         manager_version = "0.2.0-dev"
     current = request.app.state.settings.runner_version
-    latest = await _github(request).latest_runner_version()
+    latest, latest_manager = await asyncio.gather(
+        _github(request).latest_runner_version(),
+        _github(request).latest_manager_version(),
+    )
+    runner_update = bool(latest and _version_parts(latest) > _version_parts(current))
+    manager_update = bool(
+        latest_manager
+        and _version_parts(latest_manager) > _version_parts(manager_version)
+    )
     return {
         "manager": manager_version,
+        "latest_manager": latest_manager,
         "runner": current,
         "latest_runner": latest,
-        "update_available": bool(
-            latest and _version_parts(latest) > _version_parts(current)
+        "manager_update_available": manager_update,
+        "runner_update_available": runner_update,
+        "update_available": manager_update or runner_update,
+        "source_update_command": "git pull --ff-only && docker compose up -d --build",
+        "manager_release_url": (
+            f"{request.app.state.settings.github_web_url}/"
+            f"{request.app.state.settings.manager_repository}/releases"
         ),
+        "runner_release_url": "https://github.com/actions/runner/releases",
     }
 
 
