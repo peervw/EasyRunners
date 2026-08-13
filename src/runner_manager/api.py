@@ -23,7 +23,7 @@ from prometheus_client import CONTENT_TYPE_LATEST, generate_latest
 from runner_manager.auth import AuthManager
 from runner_manager.database import Database
 from runner_manager.demand import DemandTracker
-from runner_manager.github import GitHubClient, GitHubConnectionStore
+from runner_manager.github import GitHubClientRegistry, GitHubConnectionStore
 from runner_manager.metrics import WEBHOOK_FAILURES
 from runner_manager.models import (
     DiagnosticSettings,
@@ -61,8 +61,8 @@ def _scheduler(request: Request) -> Scheduler:
     return cast(Scheduler, request.app.state.scheduler)
 
 
-def _github(request: Request) -> GitHubClient:
-    return cast(GitHubClient, request.app.state.github)
+def _github(request: Request) -> GitHubClientRegistry:
+    return cast(GitHubClientRegistry, request.app.state.github)
 
 
 def _store(request: Request) -> GitHubConnectionStore:
@@ -277,15 +277,19 @@ async def dashboard(request: Request) -> Any:
     session = _auth(request).verify_session(request.cookies.get(_auth(request).cookie_name))
     if not session:
         return RedirectResponse("/auth/login", status_code=303)
-    credentials = _store(request).credentials(require_installation=False)
+    connections = _store(request).connections()
+    connection = connections[0] if len(connections) == 1 else None
     return request.app.state.templates.TemplateResponse(
         request,
         "dashboard.html",
         {
             "csrf": session["csrf"],
             "must_change": _auth(request).must_change_password,
-            "connection": credentials.connection if credentials else None,
+            "connection": connection,
+            "connections": connections,
             "webhook_enabled": request.app.state.settings.webhook_enabled,
+            "github_onboarding_enabled": request.app.state.settings.github_auth_mode
+            in {"onboarding", "auto"},
         },
     )
 
@@ -324,7 +328,7 @@ async def api_repository_adoption(
     _: Annotated[AuthContext, Depends(require_auth)],
     refresh: bool = False,
 ) -> dict[str, Any]:
-    if not _store(request).credentials():
+    if not _store(request).all_credentials():
         return {
             "repositories": [],
             "repository_count_total": 0,
@@ -512,6 +516,7 @@ async def api_scale(
             body.desired,
             body.ttl_seconds,
             body.repository,
+            body.connection_id,
         )
     except KeyError as exc:
         raise HTTPException(status_code=404, detail="unknown pool") from exc
@@ -534,8 +539,11 @@ async def api_readiness(
     request: Request, _: Annotated[AuthContext, Depends(require_auth)]
 ) -> dict[str, Any]:
     settings = request.app.state.settings
-    credentials = _store(request).credentials(require_installation=False)
-    installed = bool(credentials and credentials.connection.installation_id)
+    connections = _store(request).connections()
+    installed_connections = [
+        connection for connection in connections if connection.installation_id
+    ]
+    installed = bool(installed_connections)
     docker_ok = await request.app.state.docker.ping()
     images: dict[str, bool] = {}
     for name, pool in settings.runner_pools.items():
@@ -543,9 +551,9 @@ async def api_readiness(
         images[name] = await request.app.state.docker.image_exists(image)
     scheduler_status = await _scheduler(request).status()
     github_ok = installed and scheduler_status["github"] == "connected"
-    webhook_enabled = bool(
-        credentials and credentials.connection.webhook_enabled
-    ) or (not credentials and settings.webhook_enabled)
+    webhook_enabled = any(
+        connection.webhook_enabled for connection in installed_connections
+    ) or (not connections and settings.webhook_enabled)
     checks = {
         "public_url": {
             "ok": not webhook_enabled or settings.public_url.startswith("https://"),
@@ -558,14 +566,36 @@ async def api_readiness(
         },
         "github": {
             "ok": github_ok,
-            "detail": "App installation authenticated" if installed else "Setup not completed",
+            "detail": (
+                f"{len(installed_connections)} App installation(s) authenticated"
+                if installed
+                else "Setup not completed"
+            ),
         },
         "webhook": {
             "ok": not webhook_enabled
-            or bool(_database(request).get_setting("webhook_last_received_at")),
+            or any(
+                _database(request).get_setting(
+                    f"webhook_last_received_at:{connection.id}"
+                )
+                for connection in installed_connections
+                if connection.webhook_enabled
+            ),
             "optional": True,
             "detail": (
-                _database(request).get_setting("webhook_last_received_at")
+                max(
+                    [
+                        value
+                        for connection in installed_connections
+                        if connection.webhook_enabled
+                        and (
+                            value := _database(request).get_setting(
+                                f"webhook_last_received_at:{connection.id}"
+                            )
+                        )
+                    ],
+                    default=None,
+                )
                 if webhook_enabled
                 else "Disabled; periodic polling repairs demand"
             ),
@@ -590,11 +620,12 @@ async def api_test_runner(
     _: Annotated[AuthContext, Depends(require_mutation)],
     pool: str | None = None,
     repository: str | None = None,
+    connection_id: str | None = None,
 ) -> dict[str, Any]:
-    if not _store(request).credentials():
+    if not _store(request).all_credentials():
         raise HTTPException(status_code=409, detail="complete the GitHub App installation first")
     try:
-        return await _scheduler(request).test_runner(pool, repository)
+        return await _scheduler(request).test_runner(pool, repository, connection_id)
     except KeyError as exc:
         raise HTTPException(status_code=404, detail="unknown pool") from exc
     except ValueError as exc:
@@ -701,37 +732,72 @@ async def api_delete_token(
 async def api_github(
     request: Request, _: Annotated[AuthContext, Depends(require_auth)]
 ) -> dict[str, Any]:
-    credentials = _store(request).credentials(require_installation=False)
-    repositories: list[str] = []
-    metadata_error: str | None = None
-    repositories_error: str | None = None
-    if credentials and credentials.connection.installation_id:
-        try:
-            await _github(request).refresh_installation_metadata()
-        except (httpx.HTTPError, RuntimeError, ValueError) as exc:
-            metadata_error = str(exc)
-        try:
-            repositories = await _github(request).list_repositories()
-        except (httpx.HTTPError, RuntimeError, ValueError) as exc:
-            repositories_error = str(exc)
-        credentials = _store(request).credentials(require_installation=False)
-    connection = credentials.connection if credentials else None
-    configure_url = None
-    if connection and connection.installation_id:
-        configure_url = (
-            f"{_github(request).settings.github_web_url}/settings/installations/"
-            f"{connection.installation_id}"
+    items: list[dict[str, Any]] = []
+    all_repositories: list[str] = []
+    for original in _store(request).connections():
+        connection = original
+        repositories: list[str] = []
+        metadata_error: str | None = None
+        repositories_error: str | None = None
+        if connection.installation_id:
+            try:
+                connection = await _github(request).refresh_installation_metadata(
+                    connection.id
+                )
+            except (httpx.HTTPError, RuntimeError, ValueError) as exc:
+                metadata_error = str(exc)
+            try:
+                repositories = await _github(request).list_repositories(
+                    connection_id=connection.id
+                )
+            except (httpx.HTTPError, RuntimeError, ValueError) as exc:
+                repositories_error = str(exc)
+        all_repositories.extend(repositories)
+        configure_path = (
+            f"/organizations/{quote(connection.owner)}/settings/installations"
+            if connection.account_type == "organization"
+            else "/settings/installations"
         )
+        configure_url = (
+            f"{_github(request).settings.github_web_url}{configure_path}/"
+            f"{connection.installation_id}"
+            if connection.installation_id
+            else None
+        )
+        items.append(
+            {
+                "connection": connection.model_dump(mode="json"),
+                "installed": bool(connection.installation_id),
+                "repositories": repositories,
+                "metadata_error": metadata_error,
+                "repositories_error": repositories_error,
+                "healthy": bool(connection.installation_id)
+                and not metadata_error
+                and not repositories_error,
+                "rate_limit": (
+                    _github(request).rate_limit_status(connection.id)
+                    if connection.installation_id
+                    else {"remaining": None, "reset_at": None, "limited_until": None}
+                ),
+                "configure_url": configure_url,
+                "repository_bound": connection.scope == GitHubScope.REPO,
+                "last_webhook_at": _database(request).get_setting(
+                    f"webhook_last_received_at:{connection.id}"
+                ),
+            }
+        )
+    primary = items[0] if len(items) == 1 else None
     return {
-        "configured": bool(credentials),
-        "installed": bool(connection and connection.installation_id),
-        "connection": connection.model_dump(mode="json") if connection else None,
-        "repositories": repositories,
-        "metadata_error": metadata_error,
-        "repositories_error": repositories_error,
-        "rate_limit": _github(request).rate_limit_status(),
-        "configure_url": configure_url,
-        "repository_bound": bool(connection and connection.scope == GitHubScope.REPO),
+        "configured": bool(items),
+        "installed": any(item["installed"] for item in items),
+        "connections": items,
+        "connection": primary["connection"] if primary else None,
+        "repositories": sorted(set(all_repositories), key=str.lower),
+        "metadata_error": primary["metadata_error"] if primary else None,
+        "repositories_error": primary["repositories_error"] if primary else None,
+        "rate_limit": primary["rate_limit"] if primary else {"remaining": None},
+        "configure_url": primary["configure_url"] if primary else None,
+        "repository_bound": bool(primary and primary["repository_bound"]),
     }
 
 
@@ -743,6 +809,11 @@ async def github_manifest(
 ) -> dict[str, Any]:
     if context.kind != "session":
         raise HTTPException(status_code=403, detail="setup requires a browser session")
+    if _github(request).settings.github_auth_mode not in {"onboarding", "auto"}:
+        raise HTTPException(
+            status_code=409,
+            detail="GitHub onboarding is disabled by GITHUB_AUTH_MODE",
+        )
     if isinstance(setup_request, GitHubConnectRequest):
         try:
             setup = await _github(request).resolve_setup(setup_request)
@@ -789,6 +860,8 @@ async def github_callback(request: Request, code: str, state: str) -> Response:
     setup = GitHubSetupRequest.model_validate(raw)
     try:
         connection = await _github(request).convert_manifest(code, setup)
+    except ValueError as exc:
+        raise HTTPException(status_code=409, detail=str(exc)) from exc
     except httpx.HTTPError as exc:
         raise HTTPException(
             status_code=502, detail="GitHub could not complete the App registration"
@@ -802,11 +875,15 @@ async def github_callback(request: Request, code: str, state: str) -> Response:
 
 
 @router.get("/setup/github/installed")
-async def github_installed(request: Request, installation_id: int) -> Response:
+async def github_installed(
+    request: Request, installation_id: int, connection_id: str
+) -> Response:
     if not _auth(request).verify_session(request.cookies.get(_auth(request).cookie_name)):
         return _login_redirect(request)
     try:
-        await _github(request).validate_installation(installation_id)
+        await _github(request).validate_installation(connection_id, installation_id)
+    except KeyError as exc:
+        raise HTTPException(status_code=400, detail="unknown GitHub setup") from exc
     except (ValueError, RuntimeError) as exc:
         raise HTTPException(status_code=400, detail=str(exc)) from exc
     except httpx.HTTPError as exc:
@@ -818,10 +895,12 @@ async def github_installed(request: Request, installation_id: int) -> Response:
 
 
 @router.get("/setup/github/resume")
-async def github_resume(request: Request) -> Response:
+async def github_resume(request: Request, connection_id: str | None = None) -> Response:
     if not _auth(request).verify_session(request.cookies.get(_auth(request).cookie_name)):
         return _login_redirect(request)
-    credentials = _store(request).credentials(require_installation=False)
+    credentials = _store(request).credentials(
+        connection_id=connection_id, require_installation=False
+    )
     if not credentials:
         return RedirectResponse("/?setup=missing", status_code=303)
     connection = credentials.connection
@@ -833,25 +912,82 @@ async def github_resume(request: Request) -> Response:
     return RedirectResponse(url, status_code=303)
 
 
-@router.post("/api/github/disconnect")
+@router.post("/api/github/connections/{connection_id}/disconnect")
 async def github_disconnect(
+    request: Request,
+    connection_id: str,
+    _: Annotated[AuthContext, Depends(require_mutation)],
+) -> Response:
+    connection = _store(request).connection(connection_id)
+    if not connection:
+        raise HTTPException(status_code=404, detail="unknown GitHub connection")
+    if connection.source != "onboarding":
+        raise HTTPException(
+            status_code=409,
+            detail="this GitHub connection is managed through environment configuration",
+        )
+    active_runners = [
+        runner
+        for runner in _scheduler(request).runners()
+        if runner.get("connection_id") == connection_id
+    ]
+    active_jobs = [
+        job
+        for job in await request.app.state.demand.snapshot()
+        if job.connection_id == connection_id
+    ]
+    if active_runners or active_jobs:
+        raise HTTPException(
+            status_code=409,
+            detail=(
+                "wait for this connection's active runners and jobs to finish before "
+                "disconnecting it"
+            ),
+        )
+    _store(request).disconnect(connection_id)
+    _github(request).invalidate_connection_cache(connection_id)
+    return Response(status_code=204)
+
+
+@router.post("/api/github/disconnect")
+async def github_disconnect_legacy(
     request: Request,
     _: Annotated[AuthContext, Depends(require_mutation)],
 ) -> Response:
-    _store(request).disconnect()
-    _github(request).invalidate_connection_cache()
-    return Response(status_code=204)
+    connections = _store(request).connections()
+    if len(connections) != 1:
+        raise HTTPException(
+            status_code=409,
+            detail="choose the GitHub connection to disconnect",
+        )
+    return await github_disconnect(request, connections[0].id, _)
 
 
 @router.post("/webhooks/github")
 async def github_webhook(request: Request) -> JSONResponse:
-    credentials = _store(request).credentials(require_installation=False)
+    body = await request.body()
+    try:
+        payload = json.loads(body)
+    except json.JSONDecodeError as exc:
+        WEBHOOK_FAILURES.labels(reason="invalid_json").inc()
+        raise HTTPException(status_code=400, detail="invalid JSON payload") from exc
+    try:
+        installation = int(payload.get("installation", {}).get("id") or 0)
+    except (TypeError, ValueError):
+        installation = 0
+    connection = _store(request).find_by_installation(installation)
+    credentials = (
+        _store(request).credentials(
+            connection_id=connection.id, require_installation=False
+        )
+        if connection
+        else None
+    )
     if not credentials or not credentials.webhook_secret:
         WEBHOOK_FAILURES.labels(reason="not_configured").inc()
-        raise HTTPException(status_code=503, detail="webhooks are not configured")
+        raise HTTPException(status_code=403, detail="unknown webhook installation")
     if not credentials.connection.webhook_enabled:
         raise HTTPException(status_code=404, detail="webhooks are disabled")
-    body = await request.body()
     signature = request.headers.get("X-Hub-Signature-256", "")
     expected = (
         "sha256=" + hmac.new(credentials.webhook_secret.encode(), body, hashlib.sha256).hexdigest()
@@ -863,18 +999,14 @@ async def github_webhook(request: Request) -> JSONResponse:
     if not delivery:
         WEBHOOK_FAILURES.labels(reason="missing_delivery").inc()
         raise HTTPException(status_code=400, detail="missing delivery ID")
-    if not _database(request).claim_delivery(delivery):
+    if not _database(request).claim_delivery(
+        delivery, connection_id=credentials.connection.id
+    ):
         return JSONResponse({"accepted": True, "duplicate": True})
     if request.headers.get("X-GitHub-Event") != "workflow_job":
         return JSONResponse({"accepted": True, "ignored": True})
-    try:
-        payload = json.loads(body)
-    except json.JSONDecodeError as exc:
-        WEBHOOK_FAILURES.labels(reason="invalid_json").inc()
-        raise HTTPException(status_code=400, detail="invalid JSON payload") from exc
     connection = credentials.connection
-    installation = payload.get("installation", {}).get("id")
-    if connection.installation_id and int(installation or 0) != connection.installation_id:
+    if connection.installation_id and installation != connection.installation_id:
         WEBHOOK_FAILURES.labels(reason="installation").inc()
         raise HTTPException(status_code=403, detail="webhook installation does not match")
     repository = str(payload.get("repository", {}).get("full_name", ""))
@@ -889,9 +1021,11 @@ async def github_webhook(request: Request) -> JSONResponse:
         f"{connection.organization or connection.owner}/".lower()
     ):
         raise HTTPException(status_code=403, detail="webhook organization does not match")
-    _database(request).set_setting("webhook_last_received_at", datetime.now(UTC).isoformat())
+    _database(request).set_setting(
+        f"webhook_last_received_at:{connection.id}", datetime.now(UTC).isoformat()
+    )
     tracker: DemandTracker = request.app.state.demand
-    job = await tracker.handle_webhook(payload)
+    job = await tracker.handle_webhook(payload, connection.id)
     if job and job.status == "queued" and job.pool:
         _spawn(request, _scheduler(request).reconcile("webhook"))
     return JSONResponse({"accepted": True, "matched_pool": job.pool if job else None})

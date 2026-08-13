@@ -1,6 +1,7 @@
 import hashlib
 import hmac
 import json
+from datetime import UTC, datetime
 from typing import Any
 
 import httpx
@@ -11,7 +12,7 @@ from pydantic import SecretStr
 import runner_manager.main as main_module
 from runner_manager.database import Database
 from runner_manager.main import create_app
-from runner_manager.models import NATIVE_ARCHITECTURE, GitHubSetupRequest
+from runner_manager.models import NATIVE_ARCHITECTURE, GitHubSetupRequest, ManagedRunner
 
 
 class NoopDocker:
@@ -231,10 +232,10 @@ def test_github_status_lists_selected_repositories(client, monkeypatch) -> None:
     )
     app.state.github_store.save_installation(2, repository_selection="selected")
 
-    async def metadata(*, refresh=False):
+    async def metadata(connection_id, *, refresh=False):
         return app.state.github_store.credentials().connection
 
-    async def repositories(*, refresh=False):
+    async def repositories(*, connection_id=None, refresh=False):
         return ["peer/one", "peer/two"]
 
     monkeypatch.setattr(app.state.github, "refresh_installation_metadata", metadata)
@@ -257,10 +258,10 @@ def test_github_status_lists_repositories_when_metadata_refresh_fails(
     )
     app.state.github_store.save_installation(2, repository_selection="selected")
 
-    async def metadata(*, refresh=False):
+    async def metadata(connection_id, *, refresh=False):
         raise httpx.HTTPError("installation metadata unavailable")
 
-    async def repositories(*, refresh=False):
+    async def repositories(*, connection_id=None, refresh=False):
         return ["peer/one", "peer/two"]
 
     monkeypatch.setattr(app.state.github, "refresh_installation_metadata", metadata)
@@ -272,6 +273,76 @@ def test_github_status_lists_repositories_when_metadata_refresh_fails(
     assert response.json()["repositories"] == ["peer/one", "peer/two"]
     assert response.json()["metadata_error"] == "installation metadata unavailable"
     assert response.json()["repositories_error"] is None
+
+
+def test_github_status_and_disconnect_are_connection_scoped(client, monkeypatch) -> None:
+    test_client, app = client
+    _, csrf = login(test_client, app)
+    peer = GitHubSetupRequest(connection_id="a" * 32, scope="repo", owner="peer")
+    acme = GitHubSetupRequest(
+        connection_id="b" * 32,
+        scope="org",
+        owner="acme",
+        app_owner_kind="organization",
+    )
+    for setup, app_id, installation in ((peer, 1, 11), (acme, 2, 22)):
+        app.state.github_store.save_manifest_result(
+            setup,
+            {
+                "id": app_id,
+                "slug": f"app-{app_id}",
+                "pem": f"KEY-{app_id}",
+                "webhook_secret": f"secret-{app_id}",
+            },
+        )
+        app.state.github_store.save_installation(setup.connection_id, installation)
+
+    async def metadata(connection_id, *, refresh=False):
+        return app.state.github_store.connection(connection_id)
+
+    async def repositories(*, connection_id=None, refresh=False):
+        return {
+            peer.connection_id: ["peer/one"],
+            acme.connection_id: ["acme/service"],
+        }[connection_id]
+
+    monkeypatch.setattr(app.state.github, "refresh_installation_metadata", metadata)
+    monkeypatch.setattr(app.state.github, "list_repositories", repositories)
+    response = test_client.get("/api/github")
+    assert response.status_code == 200
+    body = response.json()
+    assert [item["connection"]["owner"] for item in body["connections"]] == [
+        "peer",
+        "acme",
+    ]
+    assert body["repositories"] == ["acme/service", "peer/one"]
+    assert body["connection"] is None
+    assert body["configure_url"] is None
+
+    app.state.scheduler._runners = [
+        ManagedRunner(
+            runner_id="active",
+            name="er-test-default-active",
+            pool="default",
+            container_id="container",
+            container_status="running",
+            created_at=datetime.now(UTC),
+            connection_id=peer.connection_id,
+        )
+    ]
+    blocked = test_client.post(
+        f"/api/github/connections/{peer.connection_id}/disconnect",
+        headers={"X-CSRF-Token": csrf},
+    )
+    assert blocked.status_code == 409
+    app.state.scheduler._runners = []
+    disconnected = test_client.post(
+        f"/api/github/connections/{peer.connection_id}/disconnect",
+        headers={"X-CSRF-Token": csrf},
+    )
+    assert disconnected.status_code == 204
+    assert app.state.github_store.connection(peer.connection_id) is None
+    assert app.state.github_store.connection(acme.connection_id) is not None
 
 
 def test_diagnostic_archives_are_authenticated_and_downloadable(client) -> None:
@@ -435,7 +506,7 @@ def test_runner_request_carries_repository_and_pool(client, monkeypatch) -> None
     )
     app.state.github_store.save_installation(2, repository_selection="selected")
 
-    async def test_runner(pool=None, repository=None):
+    async def test_runner(pool=None, repository=None, connection_id=None):
         assert pool == "standard"
         assert repository == "peer/two"
         return {"pool": pool, "repository": repository}
@@ -482,6 +553,67 @@ def test_webhook_signature_replay_and_demand(client) -> None:
     assert test_client.post("/webhooks/github", content=raw, headers=headers).json()["duplicate"]
     bad = {**headers, "X-GitHub-Delivery": "delivery-2", "X-Hub-Signature-256": "sha256=bad"}
     assert test_client.post("/webhooks/github", content=raw, headers=bad).status_code == 401
+
+
+def test_webhooks_use_the_matching_installation_secret(client) -> None:
+    test_client, app = client
+    peer = GitHubSetupRequest(connection_id="a" * 32, scope="repo", owner="peer")
+    acme = GitHubSetupRequest(connection_id="b" * 32, scope="repo", owner="acme")
+    for setup, app_id, installation, secret in (
+        (peer, 1, 11, "peer-secret"),
+        (acme, 2, 22, "acme-secret"),
+    ):
+        app.state.github_store.save_manifest_result(
+            setup,
+            {
+                "id": app_id,
+                "slug": f"app-{app_id}",
+                "pem": f"KEY-{app_id}",
+                "webhook_secret": secret,
+            },
+        )
+        app.state.github_store.save_installation(setup.connection_id, installation)
+
+    def delivery(owner, installation, job_id, secret):
+        payload = {
+            "action": "queued",
+            "installation": {"id": installation},
+            "repository": {"full_name": f"{owner}/project"},
+            "workflow_job": {
+                "id": job_id,
+                "name": "test",
+                "labels": ["self-hosted", "linux", NATIVE_ARCHITECTURE, "docker"],
+            },
+        }
+        raw = json.dumps(payload).encode()
+        return raw, {
+            "Content-Type": "application/json",
+            "X-Hub-Signature-256": "sha256="
+            + hmac.new(secret.encode(), raw, hashlib.sha256).hexdigest(),
+            "X-GitHub-Delivery": "same-delivery-id",
+            "X-GitHub-Event": "workflow_job",
+        }
+
+    peer_raw, peer_headers = delivery("peer", 11, 101, "peer-secret")
+    acme_raw, acme_headers = delivery("acme", 22, 202, "acme-secret")
+    assert test_client.post(
+        "/webhooks/github", content=peer_raw, headers=peer_headers
+    ).status_code == 200
+    assert test_client.post(
+        "/webhooks/github", content=acme_raw, headers=acme_headers
+    ).status_code == 200
+    jobs = {job.id: job for job in app.state.demand._jobs.values()}
+    assert jobs[101].connection_id == peer.connection_id
+    assert jobs[202].connection_id == acme.connection_id
+
+    wrong_raw, wrong_headers = delivery("acme", 22, 303, "peer-secret")
+    wrong_headers["X-GitHub-Delivery"] = "wrong-secret"
+    assert (
+        test_client.post(
+            "/webhooks/github", content=wrong_raw, headers=wrong_headers
+        ).status_code
+        == 401
+    )
 
 
 def test_repo_app_accepts_another_selected_repository_webhook(client) -> None:

@@ -33,7 +33,9 @@ class DemandTracker:
         self._last_seen: dict[int, datetime] = {}
         self._lock = asyncio.Lock()
 
-    async def handle_webhook(self, payload: dict[str, Any]) -> WorkflowJob | None:
+    async def handle_webhook(
+        self, payload: dict[str, Any], connection_id: str | None = None
+    ) -> WorkflowJob | None:
         raw = payload.get("workflow_job") or {}
         repository = str(payload.get("repository", {}).get("full_name", ""))
         action = str(payload.get("action", ""))
@@ -53,6 +55,7 @@ class DemandTracker:
             id=int(raw["id"]),
             run_id=raw.get("run_id"),
             repository=repository,
+            connection_id=connection_id,
             name=raw.get("name", ""),
             labels=raw.get("labels") or [],
             status=action,
@@ -70,6 +73,8 @@ class DemandTracker:
                 previous = self._jobs.pop(job.id, None)
                 if previous and not job.pool:
                     job.pool = previous.pool
+                if previous and not job.connection_id:
+                    job.connection_id = previous.connection_id
                 self._last_seen.pop(job.id, None)
                 self.database.add_history(job.id, job.model_dump(mode="json"))
                 pool = job.pool or "unmatched"
@@ -81,6 +86,8 @@ class DemandTracker:
                 previous = self._jobs.get(job.id)
                 if previous and not job.pool:
                     job.pool = previous.pool
+                if previous and not job.connection_id:
+                    job.connection_id = previous.connection_id
                 self._jobs[job.id] = job
                 self._last_seen[job.id] = now
             self._update_metrics()
@@ -139,6 +146,18 @@ class DemandTracker:
                 key=lambda job: (job.queued_at, job.id),
             )
             return [job.repository for job in jobs]
+
+    async def queued_jobs(self, pool: str) -> list[WorkflowJob]:
+        async with self._lock:
+            jobs = sorted(
+                (
+                    job
+                    for job in self._jobs.values()
+                    if job.status == "queued" and job.pool == pool
+                ),
+                key=lambda job: (job.queued_at, job.id),
+            )
+            return [job.model_copy(deep=True) for job in jobs]
 
     def _update_metrics(self) -> None:
         counts = dict.fromkeys(self.pools, 0)

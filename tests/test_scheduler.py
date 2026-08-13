@@ -12,14 +12,28 @@ from runner_manager.scheduler import Scheduler
 
 
 class ConnectedStore:
-    def credentials(self, *args, **kwargs):
-        return SimpleNamespace(
-            connection=SimpleNamespace(
-                scope=GitHubScope.REPO,
-                target_name="peer",
-                repository=None,
-            )
+    connection_id = "a" * 32
+
+    def __init__(self) -> None:
+        self._connection = SimpleNamespace(
+            id=self.connection_id,
+            scope=GitHubScope.REPO,
+            owner="peer",
+            target_name="peer",
+            repository=None,
         )
+
+    def credentials(self, *args, **kwargs):
+        return SimpleNamespace(connection=self._connection)
+
+    def all_credentials(self, *args, **kwargs):
+        return [self.credentials()]
+
+    def connections(self, *args, **kwargs):
+        return [self._connection]
+
+    def connection(self, connection_id):
+        return self._connection if connection_id == self.connection_id else None
 
 
 class FakeGitHub:
@@ -30,30 +44,38 @@ class FakeGitHub:
         self.tokens = 0
         self.token_repositories: list[str | None] = []
 
+    def connection_for_repository(self, repository):
+        return self.store._connection if repository.lower().startswith("peer/") else None
+
     async def list_runners(self, repositories=None):
         if repositories is None:
-            return list(self.remote)
-        return [
+            selected = list(self.remote)
+        else:
+            selected = [
             runner
             for runner in self.remote
             if not runner.get("repository") or runner.get("repository") in repositories
+            ]
+        return [
+            {"connection_id": self.store.connection_id, **runner}
+            for runner in selected
         ]
 
-    async def delete_runner(self, runner_id: int, repository=None):
+    async def delete_runner(self, connection_id, runner_id: int, repository=None):
         self.deleted.append(runner_id)
 
-    async def registration_token(self, repository=None):
+    async def registration_token(self, connection_id, repository=None):
         self.tokens += 1
         self.token_repositories.append(repository)
         return f"token-{self.tokens}"
 
-    def target_url(self, repository=None):
+    def target_url(self, connection_id, repository=None):
         return f"https://github.com/{repository or 'peer/repo'}"
 
     async def queued_jobs(self, repositories=None):
         return []
 
-    async def list_repositories(self):
+    async def list_repositories(self, *, connection_id=None, refresh=False):
         return ["peer/one", "peer/repo", "peer/two"]
 
 
@@ -63,6 +85,7 @@ class FakeDocker:
         self.removed: list[tuple[str, str]] = []
         self.created = 0
         self.created_repositories: list[str | None] = []
+        self.created_connections: list[str | None] = []
 
     async def ping(self):
         return True
@@ -71,10 +94,17 @@ class FakeDocker:
         return [runner.model_copy(deep=True) for runner in self.runners]
 
     async def create_runner(
-        self, pool_name, pool, registration_token, target_url, repository=None
+        self,
+        pool_name,
+        pool,
+        registration_token,
+        target_url,
+        repository=None,
+        connection_id=None,
     ):
         self.created += 1
         self.created_repositories.append(repository)
+        self.created_connections.append(connection_id)
         runner = ManagedRunner(
             runner_id=f"id-{self.created}",
             name=f"er-test-{pool_name}-{self.created}",
@@ -84,6 +114,7 @@ class FakeDocker:
             created_at=datetime.now(UTC),
             labels=sorted(pool.effective_labels),
             repository=repository,
+            connection_id=connection_id,
         )
         self.runners.append(runner)
         return runner
@@ -117,7 +148,13 @@ class FakeNotifications:
 
 class FailingDocker(FakeDocker):
     async def create_runner(
-        self, pool_name, pool, registration_token, target_url, repository=None
+        self,
+        pool_name,
+        pool,
+        registration_token,
+        target_url,
+        repository=None,
+        connection_id=None,
     ):
         raise RuntimeError("runner image could not start")
 
@@ -125,6 +162,58 @@ class FailingDocker(FakeDocker):
 class FailingGitHub(FakeGitHub):
     async def queued_jobs(self, repositories=None):
         raise RuntimeError("GitHub installation token failed")
+
+
+class MultiConnectedStore:
+    def __init__(self) -> None:
+        self._connections = [
+            SimpleNamespace(
+                id="a" * 32,
+                scope=GitHubScope.REPO,
+                owner="peer",
+                target_name="peer",
+                repository=None,
+            ),
+            SimpleNamespace(
+                id="b" * 32,
+                scope=GitHubScope.REPO,
+                owner="acme",
+                target_name="acme",
+                repository=None,
+            ),
+        ]
+
+    def connections(self, *args, **kwargs):
+        return list(self._connections)
+
+    def connection(self, connection_id):
+        return next(
+            (item for item in self._connections if item.id == connection_id), None
+        )
+
+    def all_credentials(self, *args, **kwargs):
+        return [SimpleNamespace(connection=item) for item in self._connections]
+
+
+class MultiFakeGitHub(FakeGitHub):
+    def __init__(self) -> None:
+        super().__init__()
+        self.store = MultiConnectedStore()
+        self.token_targets: list[tuple[str, str | None]] = []
+
+    def connection_for_repository(self, repository):
+        owner = repository.partition("/")[0].lower()
+        return next(
+            (item for item in self.store._connections if item.owner == owner), None
+        )
+
+    async def list_repositories(self, *, connection_id=None, refresh=False):
+        connection = self.store.connection(connection_id)
+        return [f"{connection.owner}/project"] if connection else []
+
+    async def registration_token(self, connection_id, repository=None):
+        self.token_targets.append((connection_id, repository))
+        return await super().registration_token(connection_id, repository)
 
 
 @pytest.mark.asyncio
@@ -334,6 +423,52 @@ async def test_personal_installation_creates_repository_bound_runners(
 
 
 @pytest.mark.asyncio
+async def test_jobs_from_multiple_connections_get_connection_scoped_runners(
+    settings, tmp_path: Path
+) -> None:
+    settings = settings.model_copy(
+        update={
+            "runner_pools": {
+                "default": RunnerPoolConfig(labels=["docker"], min=0, max=2)
+            }
+        }
+    )
+    database = Database(tmp_path / "state.sqlite3")
+    demand = DemandTracker(settings.runner_pools, database)
+    await demand.apply_poll(
+        [
+            WorkflowJob(
+                id=1,
+                repository="peer/project",
+                connection_id="a" * 32,
+                labels=["self-hosted", "docker"],
+                status="queued",
+            ),
+            WorkflowJob(
+                id=2,
+                repository="acme/project",
+                connection_id="b" * 32,
+                labels=["self-hosted", "docker"],
+                status="queued",
+            ),
+        ],
+        stale_after_seconds=600,
+    )
+    github = MultiFakeGitHub()
+    docker = FakeDocker()
+    scheduler = Scheduler(settings, github, docker, demand)
+    await scheduler.reconcile("webhook")
+
+    assert github.token_targets == [
+        ("a" * 32, "peer/project"),
+        ("b" * 32, "acme/project"),
+    ]
+    assert docker.created_connections == ["a" * 32, "b" * 32]
+    assert docker.created_repositories == ["peer/project", "acme/project"]
+    database.close()
+
+
+@pytest.mark.asyncio
 async def test_manual_capacity_requires_and_targets_a_selected_repository(
     settings, tmp_path: Path
 ) -> None:
@@ -403,6 +538,56 @@ async def test_idle_runner_from_another_repository_is_replaced_for_queued_work(
 
 
 @pytest.mark.asyncio
+async def test_wrong_target_idle_runner_does_not_block_a_full_pool(
+    settings, tmp_path: Path
+) -> None:
+    pool = RunnerPoolConfig(labels=["docker"], min=0, max=1, idle_timeout=0)
+    settings = settings.model_copy(update={"runner_pools": {"default": pool}})
+    database = Database(tmp_path / "state.sqlite3")
+    demand = DemandTracker(settings.runner_pools, database)
+    await demand.apply_poll(
+        [
+            WorkflowJob(
+                id=4,
+                repository="peer/two",
+                labels=["self-hosted", "docker"],
+                status="queued",
+            )
+        ],
+        stale_after_seconds=600,
+    )
+    github = FakeGitHub()
+    docker = FakeDocker()
+    old = ManagedRunner(
+        runner_id="old",
+        name="er-test-default-old",
+        pool="default",
+        repository="peer/one",
+        connection_id=github.store.connection_id,
+        container_id="old-container",
+        container_status="running",
+        created_at=datetime.now(UTC) - timedelta(minutes=5),
+    )
+    docker.runners.append(old)
+    github.remote = [
+        {
+            "id": 4,
+            "name": old.name,
+            "status": "online",
+            "busy": False,
+            "repository": "peer/one",
+        }
+    ]
+    scheduler = Scheduler(settings, github, docker, demand)
+    scheduler._idle_since[old.name] = datetime.now(UTC) - timedelta(minutes=1)
+    await scheduler.reconcile("replace")
+    assert docker.removed == [(old.name, "idle_scale_down")]
+    await scheduler.reconcile("replace")
+    assert docker.created_repositories == ["peer/two"]
+    database.close()
+
+
+@pytest.mark.asyncio
 async def test_exited_container_and_stale_registration_cleaned(settings, tmp_path: Path) -> None:
     database = Database(tmp_path / "state.sqlite3")
     demand = DemandTracker(settings.runner_pools, database)
@@ -423,6 +608,36 @@ async def test_exited_container_and_stale_registration_cleaned(settings, tmp_pat
     await scheduler.reconcile("restart")
     assert docker.removed == [("er-test-default-exited", "container_exited")]
     assert github.deleted == [44]
+    database.close()
+
+
+@pytest.mark.asyncio
+async def test_github_discovery_failure_does_not_remove_a_live_runner(
+    settings, tmp_path: Path
+) -> None:
+    database = Database(tmp_path / "state.sqlite3")
+    demand = DemandTracker(settings.runner_pools, database)
+    github = FakeGitHub()
+    github.runner_errors = {github.store.connection_id: "GitHub unavailable"}
+    docker = FakeDocker()
+    runner = ManagedRunner(
+        runner_id="live",
+        name="er-test-default-live",
+        pool="default",
+        connection_id=github.store.connection_id,
+        repository="peer/repo",
+        container_id="live-container",
+        container_status="running",
+        created_at=datetime.now(UTC) - timedelta(minutes=10),
+        state="busy",
+        busy=True,
+    )
+    docker.runners.append(runner)
+    scheduler = Scheduler(settings, github, docker, demand)
+    scheduler._runners = [runner.model_copy(deep=True)]
+    await scheduler.reconcile("github-outage")
+    assert docker.removed == []
+    assert scheduler.runners()[0]["state"] == "busy"
     database.close()
 
 

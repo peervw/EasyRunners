@@ -6,7 +6,7 @@ const esc = value => String(value ?? '').replace(
 );
 let poolConfigs = {};
 let githubRepositories = [];
-let repositoryBound = false;
+let githubConnections = [];
 let refreshing = false;
 let dashboardCache = {};
 let lastRefreshFailure = '';
@@ -185,15 +185,18 @@ function renderRepositoryAccess(github, adoption) {
   githubData = github || githubData;
   adoptionData = adoption || {repositories: [], replacements: {}};
   const target = document.querySelector('#repository-access');
-  if (!target || !githubData.connection) {
+  if (!target || !(githubData.connections || []).length) {
     if (target) target.innerHTML = '';
     return;
   }
-  const selection = githubData.connection.repository_selection;
-  const accessWarning = selection === 'all'
-    ? '<p class="access-warning">This App can access all repositories. Restrict the installation on GitHub if needed.</p>'
+  const unrestricted = (githubData.connections || []).filter(
+    item => item.connection?.repository_selection === 'all',
+  );
+  const accessWarning = unrestricted.length
+    ? `<p class="access-warning">${esc(unrestricted.map(item => item.connection.owner).join(', '))} can access all repositories. Restrict the installation on GitHub if needed.</p>`
     : '';
-  const repositoryErrors = [githubData.metadata_error, githubData.repositories_error].filter(Boolean);
+  const repositoryErrors = (githubData.connections || []).flatMap(item =>
+    [item.metadata_error, item.repositories_error].filter(Boolean));
   const records = orderedRepositories(repositoryRecords());
   const counts = repositoryCounts(records);
   const attention = records.filter(repository => repositoryGroup(repository) === 'attention');
@@ -201,15 +204,13 @@ function renderRepositoryAccess(github, adoption) {
   const listTitle = attention.length ? 'Needs attention' : 'Repository status';
   const repositoryList = records.length
     ? `<div class="repository-inline-heading"><span>${esc(listTitle)}</span><small>${esc(repositoryScanSummary())}</small></div><div class="repository-status-list">${inline.map(repositoryRow).join('')}</div>`
-    : `<p class="empty-message">${githubData.repository_bound
-      ? esc(repositoryErrors.length ? repositoryErrors.join(' · ') : 'No repositories are available to this installation.')
-      : 'No installation repositories were found.'}</p>`;
-  const configure = githubData.configure_url
-    ? `<a href="${esc(githubData.configure_url)}" target="_blank" rel="noopener">Manage access on GitHub</a>`
+    : `<p class="empty-message">${esc(repositoryErrors.length ? repositoryErrors.join(' · ') : 'No repositories are available to these installations.')}</p>`;
+  const configure = (githubData.connections || []).length === 1 && githubData.connections[0].configure_url
+    ? `<a href="${esc(githubData.connections[0].configure_url)}" target="_blank" rel="noopener">Manage access on GitHub</a>`
     : '';
   target.innerHTML = `${accessWarning}<section class="repository-access-section" aria-labelledby="repository-access-heading">
     <div class="repository-access-header">
-      <div><h3 id="repository-access-heading">Repositories</h3><p>Workflow migration across this installation.</p></div>
+      <div><h3 id="repository-access-heading">Repositories</h3><p>Workflow migration across connected accounts.</p></div>
       <button class="secondary compact refresh-adoption" type="button" ${adoptionData.scan?.scanning ? 'disabled' : ''}>${adoptionData.scan?.scanning ? 'Scanning…' : 'Scan now'}</button>
     </div>
     ${repositorySummaryFilters(counts)}
@@ -359,7 +360,9 @@ function renderUsage(usage) {
 function renderSetupChecklist(github, readiness, history) {
   const panel = document.querySelector('#setup-checklist');
   const passwordReady = panel.dataset.passwordReady === 'true';
-  const webhookEnabled = Boolean(github.connection?.webhook_enabled);
+  const webhookEnabled = (github.connections || []).some(
+    item => item.installed && item.connection?.webhook_enabled,
+  );
   const steps = [
     ['Administrator password', passwordReady],
     ['GitHub App connected', Boolean(github.installed)],
@@ -450,10 +453,85 @@ function updateRunsOn() {
   document.querySelector('#runs-on-line').textContent = `runs-on: [${labels.join(', ')}]`;
 }
 
+function targetRecords() {
+  return githubConnections.flatMap(item => {
+    const connection = item.connection || {};
+    if (!item.installed) return [];
+    if (!item.repository_bound) {
+      return [{value: `${connection.id}|`, label: `${connection.owner} · organization runner`}];
+    }
+    return (item.repositories || []).map(repository => ({
+      value: `${connection.id}|${repository}`,
+      label: repository,
+    }));
+  });
+}
+
 function repositoryOptions() {
-  if (!repositoryBound) return '<option value="">Shared organization runner</option>';
-  if (!githubRepositories.length) return '<option value="" selected>No repositories available</option>';
-  return githubRepositories.map(repository => `<option value="${esc(repository)}">${esc(repository)}</option>`).join('');
+  const targets = targetRecords();
+  if (!targets.length) return '<option value="" selected>No GitHub targets available</option>';
+  return targets.map(target => `<option value="${esc(target.value)}">${esc(target.label)}</option>`).join('');
+}
+
+function parseTarget(value = '') {
+  const [connectionId, repository = ''] = value.split('|', 2);
+  return {connectionId: connectionId || null, repository: repository || null};
+}
+
+function renderGitHubConnections(github, status) {
+  githubConnections = github.connections || [];
+  githubRepositories = github.repositories || [];
+  const installed = githubConnections.filter(item => item.installed);
+  const healthy = installed.filter(item => item.healthy);
+  const badge = document.querySelector('#github-badge');
+  if (!githubConnections.length) {
+    badge.textContent = 'Not connected';
+    badge.className = 'badge';
+  } else if (healthy.length === installed.length && installed.length) {
+    badge.textContent = `${healthy.length} connected`;
+    badge.className = 'badge online';
+  } else {
+    badge.textContent = `${healthy.length}/${githubConnections.length} healthy`;
+    badge.className = 'badge warning';
+  }
+  const target = document.querySelector('#connection-details');
+  target.innerHTML = githubConnections.length
+    ? `<div class="connection-list">${githubConnections.map(item => {
+      const connection = item.connection;
+      const count = item.repositories?.length ?? connection.repositories_count ?? 0;
+      const mode = item.repository_bound ? 'Repository runners' : 'Organization runners';
+      const detail = item.installed
+        ? `${mode} · ${count} ${count === 1 ? 'repository' : 'repositories'} · ${connection.webhook_enabled ? 'Webhooks enabled' : 'Polling only'}${item.rate_limit?.remaining == null ? '' : ` · ${item.rate_limit.remaining} API requests left`}`
+        : 'Installation is not finished';
+      const health = item.healthy ? 'Connected' : (item.installed ? 'Needs attention' : 'Pending');
+      const healthClass = item.healthy ? 'online' : (item.installed ? 'warning' : '');
+      return `<div class="connection-row">
+        <span class="provider-mark" aria-hidden="true">GH</span>
+        <div class="connection-row-copy"><strong>${esc(connection.owner)}</strong><small>${esc(detail)}</small></div>
+        <span class="badge ${healthClass}">${health}</span>
+        <div class="connection-row-actions">
+          ${!item.installed && connection.app_slug ? `<a class="button-link secondary compact" href="/setup/github/resume?connection_id=${encodeURIComponent(connection.id)}">Continue</a>` : ''}
+          ${item.configure_url ? `<a class="button-link ghost compact" href="${esc(item.configure_url)}" target="_blank" rel="noopener">Manage</a>` : ''}
+          ${connection.source === 'onboarding' ? `<button class="ghost compact disconnect-github" type="button" data-connection-id="${esc(connection.id)}" data-owner="${esc(connection.owner)}">Disconnect</button>` : ''}
+        </div>
+      </div>`;
+    }).join('')}</div>`
+    : '<p class="help-text">No GitHub account is connected yet.</p>';
+  document.querySelector('#connection-actions').hidden = !installed.length;
+  const setup = document.querySelector('#github-setup');
+  if (setup && !githubConnections.length && setup.dataset.dismissed !== 'true') setup.hidden = false;
+  const add = document.querySelector('#add-github-connection');
+  if (add) add.hidden = !setup;
+  const testTarget = document.querySelector('#test-repository');
+  if (testTarget) {
+    const previous = testTarget.value;
+    testTarget.innerHTML = repositoryOptions();
+    if (targetRecords().some(item => item.value === previous)) testTarget.value = previous;
+    testTarget.disabled = !targetRecords().length;
+  }
+  const testButton = document.querySelector('#test-runner-form button');
+  if (testButton) testButton.disabled = !targetRecords().length;
+  if (status.github === 'disconnected' && installed.length) badge.className = 'badge warning';
 }
 
 async function json(url, options = {}) {
@@ -546,17 +624,7 @@ async function refresh() {
     const healthy = readiness.ready && status.docker === 'connected';
     headerHealth.className = `sidebar-footer ${healthy ? 'healthy' : 'unhealthy'}`;
     headerHealthText.textContent = healthy ? 'Ready' : 'Needs attention';
-    const badge = document.querySelector('#github-badge');
-    const githubState = github.installed ? status.github : (github.configured ? 'installation pending' : 'not configured');
-    badge.textContent = githubState;
-    badge.className = `badge ${status.github === 'connected' ? 'online' : 'offline'}`;
-    const repositoryCount = github.repositories?.length ?? github.connection?.repositories_count ?? 0;
-    const mode = github.repository_bound ? 'Repository runners' : 'Organization runners';
-    document.querySelector('#connection-details').innerHTML = github.connection
-      ? `<div class="connection-identity"><span class="provider-mark" aria-hidden="true">GH</span><div><strong>${esc(github.connection.owner)}</strong><small>${esc(mode)} · ${esc(github.connection.app_slug || 'manual app')} · ${github.connection.webhook_enabled ? 'Webhooks enabled' : 'Polling only'} · ${repositoryCount} ${repositoryCount === 1 ? 'repository' : 'repositories'}${github.rate_limit?.remaining == null ? '' : ` · ${github.rate_limit.remaining} API requests left`}</small></div></div>`
-      : '<p class="help-text">No GitHub App is connected.</p>';
-    githubRepositories = github.repositories || [];
-    repositoryBound = Boolean(github.repository_bound);
+    renderGitHubConnections(github, status);
     document.querySelector('#updated').textContent = status.last_reconcile
       ? `Updated ${new Date(status.last_reconcile).toLocaleTimeString()}`
       : '';
@@ -588,14 +656,14 @@ async function refresh() {
         </div>
         <progress class="capacity-track" value="${active}" max="${pool.max || 1}" title="${active} of ${pool.max} runners active">${capacity}%</progress>
         <div class="labels">${labels.map(label => `<span class="label">${esc(label)}</span>`).join('')}</div>
-        ${pool.manual_floors?.length ? `<p class="manual-floor">${pool.manual_floors.map(floor => `${esc(floor.repository || 'organization')}: ${floor.desired} pre-warmed`).join(' · ')}</p>` : ''}
+        ${pool.manual_floors?.length ? `<p class="manual-floor">${pool.manual_floors.map(floor => `${esc(floor.repository || githubConnections.find(item => item.connection.id === floor.connection_id)?.connection.owner || 'organization')}: ${floor.desired} pre-warmed`).join(' · ')}</p>` : ''}
         <details class="pool-controls">
           <summary>Pre-warm</summary>
           <form class="scale-form" data-pool="${esc(name)}">
-            ${repositoryBound ? `<label>Repository<select name="repository" required>${repositoryOptions()}</select></label>` : ''}
+            <label>GitHub target<select name="target" required>${repositoryOptions()}</select></label>
             <label>Runners<input name="desired" type="number" min="0" max="${pool.max}" value="0"></label>
             <label>TTL (sec)<input name="ttl" type="number" min="30" value="600"></label>
-            <button ${repositoryBound && !githubRepositories.length ? 'disabled title="No GitHub repositories are available"' : ''}>Apply</button>
+            <button ${!targetRecords().length ? 'disabled title="No GitHub targets are available"' : ''}>Apply</button>
           </form>
         </details>
       </article>`;
@@ -610,9 +678,8 @@ async function refresh() {
     if (testRepository) {
       const selectedTestRepository = testRepository.value;
       testRepository.innerHTML = repositoryOptions();
-      testRepository.classList.toggle('hidden', !repositoryBound);
-      testRepository.disabled = repositoryBound && !githubRepositories.length;
-      if (githubRepositories.includes(selectedTestRepository)) testRepository.value = selectedTestRepository;
+      testRepository.disabled = !targetRecords().length;
+      if (targetRecords().some(target => target.value === selectedTestRepository)) testRepository.value = selectedTestRepository;
     }
     const testPool = document.querySelector('#test-pool');
     if (testPool) {
@@ -622,7 +689,7 @@ async function refresh() {
     }
     const testRunnerButton = document.querySelector('#test-runner-form button');
     if (testRunnerButton) {
-      testRunnerButton.disabled = repositoryBound && !githubRepositories.length;
+      testRunnerButton.disabled = !targetRecords().length;
       testRunnerButton.title = testRunnerButton.disabled ? 'No GitHub repositories are available' : '';
     }
     updateRunsOn();
@@ -685,11 +752,13 @@ function bindDynamic() {
   document.querySelectorAll('.scale-form').forEach(form => {
     form.onsubmit = async event => {
       event.preventDefault();
+      const target = parseTarget(form.querySelector('[name="target"]')?.value);
       const result = await action(() => json(`/api/pools/${encodeURIComponent(form.dataset.pool)}/scale`, {
         method: 'POST', headers, body: JSON.stringify({
           desired: Number(form.desired.value),
           ttl_seconds: Number(form.ttl.value),
-          repository: form.repository?.value || null,
+          repository: target.repository,
+          connection_id: target.connectionId,
         }),
       }), 'Pre-warm request applied.');
       if (result) refresh();
@@ -732,6 +801,15 @@ function bindDynamic() {
       }
     };
   });
+  document.querySelectorAll('.disconnect-github').forEach(button => {
+    button.onclick = async () => {
+      if (!window.confirm(`Disconnect ${button.dataset.owner} from EasyRunners? The App remains installed on GitHub.`)) return;
+      const result = await action(() => json(`/api/github/connections/${encodeURIComponent(button.dataset.connectionId)}/disconnect`, {
+        method: 'POST', headers,
+      }), `${button.dataset.owner} disconnected locally.`);
+      if (result !== undefined) refresh();
+    };
+  });
 }
 
 document.querySelector('#reconcile')?.addEventListener('click', async () => {
@@ -741,14 +819,11 @@ document.querySelector('#reconcile')?.addEventListener('click', async () => {
 document.querySelector('#test-runner-form')?.addEventListener('submit', async event => {
   event.preventDefault();
   const params = new URLSearchParams({pool: event.target.pool.value});
-  if (event.target.repository?.value) params.set('repository', event.target.repository.value);
+  const target = parseTarget(event.target.querySelector('[name="target"]')?.value);
+  if (target.connectionId) params.set('connection_id', target.connectionId);
+  if (target.repository) params.set('repository', target.repository);
   await action(() => json(`/api/readiness/test-runner?${params}`, {method: 'POST', headers}), 'Test runner requested. Watch the runner list.');
   refresh();
-});
-document.querySelector('#disconnect-github')?.addEventListener('click', async () => {
-  if (!window.confirm('Disconnect this GitHub App from EasyRunners? The App remains installed on GitHub.')) return;
-  await action(() => json('/api/github/disconnect', {method: 'POST', headers}), 'GitHub disconnected locally.');
-  window.location.reload();
 });
 document.querySelector('#token-form')?.addEventListener('submit', async event => {
   event.preventDefault();
@@ -807,6 +882,19 @@ document.querySelector('#github-setup')?.addEventListener('submit', async event 
   const manifest = document.createElement('input');
   manifest.type = 'hidden'; manifest.name = 'manifest'; manifest.value = JSON.stringify(result.manifest);
   form.appendChild(manifest); document.body.appendChild(form); form.submit();
+});
+document.querySelector('#add-github-connection')?.addEventListener('click', () => {
+  const form = document.querySelector('#github-setup');
+  if (!form) return;
+  delete form.dataset.dismissed;
+  form.hidden = false;
+  form.target_url.focus();
+});
+document.querySelector('#cancel-github-connection')?.addEventListener('click', () => {
+  const form = document.querySelector('#github-setup');
+  form.dataset.dismissed = 'true';
+  form.hidden = true;
+  document.querySelector('#setup-progress').textContent = '';
 });
 document.querySelector('#pool-form')?.addEventListener('submit', async event => {
   event.preventDefault();

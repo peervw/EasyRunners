@@ -7,7 +7,8 @@ import pytest
 from runner_manager.auth import AuthManager
 from runner_manager.config import Settings
 from runner_manager.database import Database
-from runner_manager.models import TokenScope
+from runner_manager.github import GitHubConnection, GitHubConnectionStore
+from runner_manager.models import GitHubScope, TokenScope
 
 
 @pytest.fixture
@@ -97,7 +98,7 @@ def test_legacy_api_tokens_migrate_with_manage_scope(tmp_path: Path) -> None:
     assert record["expires_at"] is None
     database.close()
     with sqlite3.connect(path) as connection:
-        assert connection.execute("PRAGMA user_version").fetchone()[0] == 2
+        assert connection.execute("PRAGMA user_version").fetchone()[0] == 3
 
 
 def test_login_rate_window(auth_stack) -> None:
@@ -121,6 +122,50 @@ def test_delivery_dedup_history_and_setup_state(auth_stack) -> None:
     database.create_setup_state("state", {"owner": "peer"})
     assert database.consume_setup_state("state") == {"owner": "peer"}
     assert database.consume_setup_state("state") is None
+    database.close()
+
+
+def test_legacy_github_connection_migrates_without_reconnect(tmp_path: Path) -> None:
+    settings = Settings(
+        public_url="https://runners.example.com",
+        data_dir=tmp_path,
+        config_path=tmp_path / "missing",
+        github_auth_mode="onboarding",
+    )
+    database = Database(tmp_path / "state.sqlite3")
+    legacy = GitHubConnection(
+        auth_type="app",
+        scope=GitHubScope.REPO,
+        owner="peer",
+        app_id=1,
+        installation_id=2,
+        app_slug="easy-peer",
+        source="onboarding",
+    )
+    database.set_setting("github_connection", legacy.model_dump_json())
+    database.set_setting("webhook_last_received_at", "2026-08-13T12:00:00+00:00")
+    github_dir = tmp_path / "github"
+    github_dir.mkdir()
+    (github_dir / "app.pem").write_text("PRIVATE")
+    (github_dir / "webhook.secret").write_text("secret")
+
+    store = GitHubConnectionStore(settings, database)
+    connections = store.connections()
+    assert len(connections) == 1
+    connection = connections[0]
+    assert connection.id
+    assert store.credentials(connection_id=connection.id).private_key == "PRIVATE"
+    assert database.get_setting("github_connection") is None
+    assert database.get_setting(f"webhook_last_received_at:{connection.id}")
+    assert (github_dir / connection.id / "app.pem").stat().st_mode & 0o777 == 0o600
+    database.close()
+
+
+def test_webhook_delivery_ids_are_scoped_to_the_connection(auth_stack) -> None:
+    _, database = auth_stack
+    assert database.claim_delivery("same", connection_id="one")
+    assert database.claim_delivery("same", connection_id="two")
+    assert not database.claim_delivery("same", connection_id="one")
     database.close()
 
 

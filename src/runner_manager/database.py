@@ -53,6 +53,13 @@ class Database:
                     payload TEXT NOT NULL,
                     expires_at TEXT NOT NULL
                 );
+                CREATE TABLE IF NOT EXISTS github_connections (
+                    id TEXT PRIMARY KEY,
+                    owner TEXT NOT NULL COLLATE NOCASE UNIQUE,
+                    payload TEXT NOT NULL,
+                    created_at TEXT NOT NULL,
+                    updated_at TEXT NOT NULL
+                );
                 """
             )
             columns = {
@@ -65,7 +72,24 @@ class Database:
                 )
             if "expires_at" not in columns:
                 self._conn.execute("ALTER TABLE api_tokens ADD COLUMN expires_at TEXT")
-            self._conn.execute("PRAGMA user_version=2")
+            version = int(self._conn.execute("PRAGMA user_version").fetchone()[0])
+            if version < 3:
+                self._conn.executescript(
+                    """
+                    CREATE TABLE webhook_deliveries_v3 (
+                        connection_id TEXT NOT NULL,
+                        delivery_id TEXT NOT NULL,
+                        received_at TEXT NOT NULL,
+                        PRIMARY KEY(connection_id, delivery_id)
+                    );
+                    INSERT OR IGNORE INTO webhook_deliveries_v3(
+                        connection_id, delivery_id, received_at
+                    ) SELECT 'legacy', delivery_id, received_at FROM webhook_deliveries;
+                    DROP TABLE webhook_deliveries;
+                    ALTER TABLE webhook_deliveries_v3 RENAME TO webhook_deliveries;
+                    """
+                )
+            self._conn.execute("PRAGMA user_version=3")
 
     def close(self) -> None:
         with self._lock:
@@ -87,6 +111,56 @@ class Database:
     def delete_setting(self, key: str) -> None:
         with self._lock, self._conn:
             self._conn.execute("DELETE FROM settings WHERE key = ?", (key,))
+
+    def upsert_github_connection(
+        self, connection_id: str, owner: str, payload: str
+    ) -> None:
+        now = datetime.now(UTC).isoformat()
+        with self._lock, self._conn:
+            self._conn.execute(
+                "INSERT INTO github_connections(id, owner, payload, created_at, updated_at) "
+                "VALUES(?, ?, ?, ?, ?) "
+                "ON CONFLICT(id) DO UPDATE SET "
+                "owner=excluded.owner, payload=excluded.payload, updated_at=excluded.updated_at",
+                (connection_id, owner, payload, now, now),
+            )
+
+    def get_github_connection(self, connection_id: str) -> dict[str, Any] | None:
+        with self._lock:
+            row = self._conn.execute(
+                "SELECT id, owner, payload, created_at, updated_at "
+                "FROM github_connections WHERE id = ?",
+                (connection_id,),
+            ).fetchone()
+            return dict(row) if row else None
+
+    def find_github_connection(self, owner: str) -> dict[str, Any] | None:
+        with self._lock:
+            row = self._conn.execute(
+                "SELECT id, owner, payload, created_at, updated_at "
+                "FROM github_connections WHERE owner = ? COLLATE NOCASE",
+                (owner,),
+            ).fetchone()
+            return dict(row) if row else None
+
+    def list_github_connections(self) -> list[dict[str, Any]]:
+        with self._lock:
+            rows = self._conn.execute(
+                "SELECT id, owner, payload, created_at, updated_at "
+                "FROM github_connections ORDER BY created_at, owner COLLATE NOCASE"
+            ).fetchall()
+            return [dict(row) for row in rows]
+
+    def delete_github_connection(self, connection_id: str) -> bool:
+        with self._lock, self._conn:
+            cursor = self._conn.execute(
+                "DELETE FROM github_connections WHERE id = ?", (connection_id,)
+            )
+            self._conn.execute(
+                "DELETE FROM webhook_deliveries WHERE connection_id = ?",
+                (connection_id,),
+            )
+            return cursor.rowcount > 0
 
     def create_api_token(
         self,
@@ -131,15 +205,22 @@ class Database:
             cursor = self._conn.execute("DELETE FROM api_tokens WHERE id = ?", (token_id,))
             return cursor.rowcount > 0
 
-    def claim_delivery(self, delivery_id: str, retention_hours: int = 24) -> bool:
+    def claim_delivery(
+        self,
+        delivery_id: str,
+        retention_hours: int = 24,
+        *,
+        connection_id: str = "legacy",
+    ) -> bool:
         now = datetime.now(UTC)
         cutoff = (now - timedelta(hours=retention_hours)).isoformat()
         with self._lock, self._conn:
             self._conn.execute("DELETE FROM webhook_deliveries WHERE received_at < ?", (cutoff,))
             try:
                 self._conn.execute(
-                    "INSERT INTO webhook_deliveries(delivery_id, received_at) VALUES(?, ?)",
-                    (delivery_id, now.isoformat()),
+                    "INSERT INTO webhook_deliveries(connection_id, delivery_id, received_at) "
+                    "VALUES(?, ?, ?)",
+                    (connection_id, delivery_id, now.isoformat()),
                 )
             except sqlite3.IntegrityError:
                 return False

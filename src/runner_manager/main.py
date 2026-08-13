@@ -21,7 +21,7 @@ from runner_manager.config import Settings, load_settings, migrate_legacy_pools
 from runner_manager.database import Database
 from runner_manager.demand import DemandTracker
 from runner_manager.docker import DockerRunnerManager
-from runner_manager.github import GitHubClient, GitHubConnectionStore
+from runner_manager.github import GitHubClientRegistry, GitHubConnectionStore
 from runner_manager.models import DiagnosticSettings, RunnerPoolConfig
 from runner_manager.notifications import NotificationManager
 from runner_manager.scheduler import Scheduler
@@ -97,7 +97,7 @@ def create_app(settings: Settings | None = None, *, start_scheduler: bool = True
                 )
         auth = AuthManager(configured, database)
         store = GitHubConnectionStore(configured, database)
-        github = GitHubClient(configured, store)
+        github = GitHubClientRegistry(configured, store)
         docker = DockerRunnerManager(configured)
         demand = DemandTracker(configured.runner_pools, database)
         notifications = NotificationManager(configured)

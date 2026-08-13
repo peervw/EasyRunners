@@ -200,41 +200,34 @@
 
             <section id="connection" class="card settings-card">
               <div class="settings-row">
-                <div class="settings-copy"><h2>GitHub integration</h2><p>App installation, repository access, and runner tests.</p></div>
-                <span id="github-badge" class="badge">Loading</span>
+                <div class="settings-copy"><h2>GitHub integrations</h2><p>Accounts, organizations, repository access, and runner tests.</p></div>
+                <div class="settings-heading-actions"><span id="github-badge" class="badge">Loading</span><button id="add-github-connection" class="secondary compact" type="button" {% if must_change or not github_onboarding_enabled %}hidden{% endif %}>Add account</button></div>
               </div>
               <div class="settings-body">
                 <div id="connection-details" class="connection-details"></div>
                 <div id="repository-access"></div>
 
-                {% if connection and not connection.installation_id and connection.app_slug %}
-                <div class="actions">
-                  <a class="button-link" href="/setup/github/resume">Continue installation</a>
-                  <button id="disconnect-github" class="ghost" type="button">Start over</button>
-                </div>
-                {% elif connection and connection.installation_id %}
-                <div class="connection-actions">
+                <div id="connection-actions" class="connection-actions" hidden>
                   <form id="test-runner-form" class="inline-form test-runner-form">
-                    <select id="test-repository" name="repository" aria-label="Test repository"></select>
+                    <select id="test-repository" name="target" aria-label="Test GitHub target"></select>
                     <select id="test-pool" name="pool" aria-label="Test runner pool"></select>
                     <button type="submit">Start test runner</button>
                   </form>
-                  <button id="disconnect-github" class="ghost compact" type="button">Disconnect</button>
                 </div>
-                {% endif %}
 
-                {% if not connection and not must_change %}
-                <form id="github-setup" class="connect-form">
+                {% if not must_change and github_onboarding_enabled %}
+                <form id="github-setup" class="connect-form" hidden>
+                  <div class="connect-form-heading"><div><strong>Add a GitHub account</strong><p>EasyRunners creates a separate private App for this account.</p></div><button id="cancel-github-connection" class="ghost compact" type="button">Cancel</button></div>
                   <label>GitHub account or organization URL
                     <div class="input-action">
                       <input name="target_url" type="url" placeholder="https://github.com/owner" required>
-                      <button type="submit">Connect GitHub</button>
+                      <button type="submit">Continue with GitHub</button>
                     </div>
                   </label>
                   <details class="subtle-details">
                     <summary>Options</summary>
                     <div class="option-list">
-                      <label class="check-label"><input name="organization_wide" type="checkbox"> Use organization-level runners</label>
+                      <label class="check-label"><input name="organization_wide" type="checkbox"> Use organization-level runners <small>Advanced; restrict access with a runner group.</small></label>
                       <label class="check-label"><input name="webhook_enabled" type="checkbox" {% if webhook_enabled %}checked{% endif %}> Enable webhook scaling</label>
                     </div>
                   </details>

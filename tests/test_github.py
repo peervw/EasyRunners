@@ -6,7 +6,12 @@ import pytest
 
 from runner_manager.config import Settings
 from runner_manager.database import Database
-from runner_manager.github import GitHubClient, GitHubConnectionStore, GitHubRateLimitError
+from runner_manager.github import (
+    GitHubClient,
+    GitHubClientRegistry,
+    GitHubConnectionStore,
+    GitHubRateLimitError,
+)
 from runner_manager.models import (
     DockerMode,
     GitHubConnectRequest,
@@ -74,6 +79,122 @@ def test_manifest_has_exact_scope_permissions(settings, tmp_path) -> None:
     database.close()
 
 
+def test_connection_store_isolates_multiple_accounts(tmp_path) -> None:
+    _, store, database = make_stack(
+        tmp_path, lambda request: httpx.Response(500, request=request)
+    )
+    peer = GitHubSetupRequest(
+        connection_id="a" * 32,
+        scope="repo",
+        owner="peer",
+    )
+    acme = GitHubSetupRequest(
+        connection_id="b" * 32,
+        scope="org",
+        owner="acme",
+        app_owner_kind="organization",
+    )
+    store.save_manifest_result(
+        peer,
+        {"id": 1, "slug": "peer-app", "pem": "PEER", "webhook_secret": "one"},
+    )
+    store.save_manifest_result(
+        acme,
+        {"id": 2, "slug": "acme-app", "pem": "ACME", "webhook_secret": "two"},
+    )
+    store.save_installation(peer.connection_id, 11)
+    store.save_installation(acme.connection_id, 22)
+
+    assert [item.owner for item in store.connections()] == ["peer", "acme"]
+    assert store.credentials(connection_id=peer.connection_id).private_key == "PEER"
+    assert store.credentials(connection_id=acme.connection_id).webhook_secret == "tw" + "o"
+    assert store.find_by_repository("acme/service").id == acme.connection_id
+    assert store.find_by_installation(11).id == peer.connection_id
+    assert (tmp_path / "github" / peer.connection_id / "app.pem").exists()
+    assert (tmp_path / "github" / acme.connection_id / "app.pem").exists()
+
+    with pytest.raises(ValueError, match="already connected"):
+        store.save_manifest_result(
+            GitHubSetupRequest(scope="repo", owner="PEER"),
+            {"id": 3, "slug": "duplicate", "pem": "X", "webhook_secret": "x"},
+        )
+
+    store.disconnect(peer.connection_id)
+    assert store.connection(peer.connection_id) is None
+    assert store.credentials(connection_id=acme.connection_id).private_key == "ACME"
+    assert not (tmp_path / "github" / peer.connection_id).exists()
+    database.close()
+
+
+@pytest.mark.asyncio
+async def test_registry_routes_registration_tokens_to_the_right_account(
+    tmp_path, monkeypatch
+) -> None:
+    calls: list[tuple[str, str]] = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        authorization = request.headers.get("Authorization", "")
+        calls.append((request.url.path, authorization))
+        if request.url.path == "/app/installations/11/access_tokens":
+            return httpx.Response(
+                201,
+                json={"token": "peer-token", "expires_at": "2099-01-01T00:00:00Z"},
+            )
+        if request.url.path == "/app/installations/22/access_tokens":
+            return httpx.Response(
+                201,
+                json={"token": "acme-token", "expires_at": "2099-01-01T00:00:00Z"},
+            )
+        if request.url.path == "/repos/peer/project/actions/runners/registration-token":
+            assert authorization == "Bearer peer-token"
+            return httpx.Response(201, json={"token": "peer-registration"})
+        if request.url.path == "/repos/acme/service/actions/runners/registration-token":
+            assert authorization == "Bearer acme-token"
+            return httpx.Response(201, json={"token": "acme-registration"})
+        raise AssertionError(request.url)
+
+    settings = Settings(
+        public_url="https://runners.example.com",
+        data_dir=tmp_path,
+        config_path=tmp_path / "none",
+        github_auth_mode="onboarding",
+        runner_pools={"default": RunnerPoolConfig(labels=["docker"])},
+    )
+    database = Database(tmp_path / "state.sqlite3")
+    store = GitHubConnectionStore(settings, database)
+    peer = GitHubSetupRequest(connection_id="a" * 32, scope="repo", owner="peer")
+    acme = GitHubSetupRequest(connection_id="b" * 32, scope="repo", owner="acme")
+    for setup, app_id, installation in ((peer, 1, 11), (acme, 2, 22)):
+        store.save_manifest_result(
+            setup,
+            {
+                "id": app_id,
+                "slug": f"app-{app_id}",
+                "pem": f"KEY-{app_id}",
+                "webhook_secret": f"secret-{app_id}",
+            },
+        )
+        store.save_installation(setup.connection_id, installation)
+    http = httpx.AsyncClient(transport=httpx.MockTransport(handler))
+    registry = GitHubClientRegistry(settings, store, http)
+    monkeypatch.setattr("runner_manager.github.GitHubAuth.app_jwt", lambda *args: "jwt")
+
+    assert (
+        await registry.registration_token(peer.connection_id, "peer/project")
+        == "peer-registration"
+    )
+    assert (
+        await registry.registration_token(acme.connection_id, "acme/service")
+        == "acme-registration"
+    )
+    with pytest.raises(ValueError, match="does not belong"):
+        await registry.registration_token(peer.connection_id, "acme/service")
+    assert len([path for path, _ in calls if path.endswith("access_tokens")]) == 2
+    await registry.close()
+    await http.aclose()
+    database.close()
+
+
 @pytest.mark.asyncio
 async def test_one_url_setup_detects_owner_kind_and_polling_mode(tmp_path) -> None:
     def handler(request: httpx.Request) -> httpx.Response:
@@ -110,8 +231,9 @@ async def test_convert_manifest_persists_secrets(tmp_path) -> None:
         "code", GitHubSetupRequest(scope="repo", owner="peer", repository="repo")
     )
     assert connection.app_id == 12
-    assert (tmp_path / "github/app.pem").read_text() == "PRIVATE"
-    assert (tmp_path / "github/app.pem").stat().st_mode & 0o777 == 0o600
+    pem_path = tmp_path / "github" / connection.id / "app.pem"
+    assert pem_path.read_text() == "PRIVATE"
+    assert pem_path.stat().st_mode & 0o777 == 0o600
     assert store.credentials(require_installation=False).webhook_secret == "ho" + "ok"
     await client.close()
     database.close()
@@ -364,8 +486,20 @@ async def test_app_installation_discovers_multiple_repositories_and_targets_regi
     assert await client.list_repositories() == ["peer/one", "peer/two"]
     assert await client.registration_token("peer/two") == "registration"
     assert await client.list_runners() == [
-        {"id": 11, "name": "one", "status": "online", "repository": "peer/one"},
-        {"id": 22, "name": "two", "status": "online", "repository": "peer/two"},
+        {
+            "id": 11,
+            "name": "one",
+            "status": "online",
+            "repository": "peer/one",
+            "connection_id": store.credentials().connection.id,
+        },
+        {
+            "id": 22,
+            "name": "two",
+            "status": "online",
+            "repository": "peer/two",
+            "connection_id": store.credentials().connection.id,
+        },
     ]
     await client.delete_runner(22, "peer/two")
     with pytest.raises(ValueError, match="does not belong"):

@@ -35,6 +35,10 @@ EasyRunners creates the private GitHub App with the required permissions and dis
 repositories automatically. No registration token, App private key, or webhook secret needs to be
 copied by hand.
 
+Need another personal account or organization later? Open **Settings → GitHub integrations** and
+choose **Add account**. Each account gets its own private App and repository-access controls; all of
+them share the same runner pools and host capacity.
+
 ### 3. Change one line
 
 Replace the job's current `runs-on` value:
@@ -71,7 +75,8 @@ Behind that simple setup:
 
 - Jobs get a fresh container filesystem and workspace.
 - Runners scale to zero and disappear after one job.
-- One GitHub App installation can serve many selected repositories.
+- Each GitHub account or organization has an isolated App installation and can expose many selected
+  repositories.
 - The universal runner image includes Docker tooling, Python, Rust, and common build tools.
 - The standard pool has no Docker socket; the Docker pool is available when a job needs it.
 - No Kubernetes, external database, queue, or registry login is required.
@@ -97,9 +102,16 @@ cannot run on a runner registered to repository B. One App installation can stil
 repository selected on GitHub. For organizations, the optional shared-runner mode registers at the
 organization level and should be restricted with GitHub runner groups.
 
-If login expires or the browser is closed during setup, sign in again and use **Continue GitHub
-installation**. **Start over** clears the local connection; remove an abandoned App separately in
-GitHub settings if desired.
+EasyRunners can connect several GitHub accounts and organizations at once. GitHub private Apps are
+owned by one account, so EasyRunners creates one App per connected owner instead of asking you to
+maintain a shared public App. Webhook secrets, installation tokens, repository scans, and runner
+registrations remain tied to that connection. The same account cannot be added twice to one
+deployment, which prevents duplicate job events and ambiguous routing.
+
+If login expires or the browser is closed during setup, sign in again and use **Continue** next to
+the pending account. **Disconnect** clears that account locally; remove an abandoned App separately
+in GitHub settings if desired. EasyRunners waits for active jobs and runners before allowing a
+connection to be removed.
 
 EasyRunners stores the generated App private key and webhook secret in the `easy-runners-data`
 volume with mode `0600`. It verifies that GitHub's returned installation belongs to the configured
@@ -377,12 +389,13 @@ Endpoints:
 - `GET|PUT /api/settings/diagnostics` for capture, automatic cleanup, and retention settings
 - `PUT|DELETE /api/pools/{pool}` and YAML pool import/export endpoints
 - `POST /api/pools/{pool}/scale` with
-  `{"desired": 2, "ttl_seconds": 600, "repository": "owner/repository"}`
-- `POST /api/readiness/test-runner?pool=standard&repository=owner/repository` to pre-warm one runner for
-  five minutes
+  `{"desired": 2, "ttl_seconds": 600, "connection_id": "…", "repository":
+  "owner/repository"}`
+- `POST /api/readiness/test-runner?pool=standard&connection_id=…&repository=owner/repository` to
+  pre-warm one runner for five minutes
 - `POST /api/reconcile`
 - `GET|POST /api/auth/tokens` and `DELETE /api/auth/tokens/{id}`
-- `GET /api/github`, setup/disconnect routes
+- `GET /api/github`, setup routes, and `POST /api/github/connections/{id}/disconnect`
 - `POST /webhooks/github` — HMAC-SHA256 signed GitHub deliveries only
 - `GET /metrics` — Prometheus format, requiring session or bearer token
 
