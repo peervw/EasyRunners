@@ -2,6 +2,13 @@
 
 Notable changes are recorded here by the release workflow.
 
+## [0.4.0](https://github.com/peervw/EasyRunners/compare/v0.3.0...v0.4.0) (2026-08-13)
+
+
+### Features
+
+* support multiple GitHub connections ([#17](https://github.com/peervw/EasyRunners/issues/17)) ([2e1651d](https://github.com/peervw/EasyRunners/commit/2e1651d5f0bd43256913a7a9496b5dbea90eaa30))
+
 ## [0.3.0](https://github.com/peervw/EasyRunners/compare/v0.2.0...v0.3.0) (2026-08-12)
 
 
