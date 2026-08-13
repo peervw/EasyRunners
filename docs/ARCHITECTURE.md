@@ -9,8 +9,16 @@ reconciliation enumerates repositories accessible to the App installation.
 Repository registration scope and installation scope are deliberately separate. A personal account
 has no account-wide self-hosted runner API, so each runner is registered only to the selected
 repository whose queued job caused it to be created. The repository is persisted as a Docker label
-for restart adoption and cleanup. Pool maximums remain deployment-wide. Organization mode instead
-uses shared organization runner registrations and GitHub runner groups for repository access.
+for restart adoption and cleanup. Organization mode instead uses shared organization runner
+registrations and GitHub runner groups for repository access.
+
+A deployment may connect several GitHub accounts or organizations. GitHub private Apps belong to
+one owner, so onboarding creates one App and installation per connected owner. Connection metadata
+is stored in SQLite while each App key and webhook secret lives in its own mode-`0600` directory.
+Workflow jobs, Docker containers, registration tokens, runner discovery, webhook replay IDs, and
+repository scans carry the connection ID. Owners are unique within a deployment to prevent the same
+GitHub delivery from being observed through overlapping installations. Runner pool minimums and
+maximums remain deployment-wide.
 
 The manager is a single async process. A reconciliation lock serializes capacity changes. Docker
 labels are the source of truth for locally managed runner containers, and GitHub's runner list is
@@ -22,7 +30,7 @@ Each capacity unit is a fresh container running GitHub's official `config.sh --e
 removes the container. The default Docker socket mode is intentionally simple but gives the workflow
 root-equivalent control of the Docker host. It is suitable only for trusted workflow code.
 
-The embedded database holds control-plane authentication, one-time setup state, webhook replay IDs,
-and bounded history. GitHub App keys remain files with mode `0600` in the same persistent volume.
-One EasyRunners deployment manages one GitHub App installation and must run exactly one manager
-replica. That installation may contain multiple selected repositories owned by the same account.
+The embedded database holds control-plane authentication, GitHub connection metadata, one-time
+setup state, connection-scoped webhook replay IDs, and bounded history. GitHub App keys remain files
+with mode `0600` in the same persistent volume. One EasyRunners deployment may manage several App
+installations but must run exactly one manager replica.

@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import platform
+import uuid
 from datetime import UTC, datetime
 from enum import StrEnum
 from typing import Literal
@@ -110,6 +111,7 @@ class WorkflowJob(BaseModel):
     id: int
     run_id: int | None = None
     repository: str
+    connection_id: str | None = None
     name: str = ""
     labels: list[str] = Field(default_factory=list)
     status: Literal["queued", "in_progress", "completed"]
@@ -135,6 +137,7 @@ class ManagedRunner(BaseModel):
     created_at: datetime
     labels: list[str] = Field(default_factory=list)
     repository: str | None = None
+    connection_id: str | None = None
     state: Literal["starting", "idle", "busy", "exited", "unknown"] = "starting"
     github_runner_id: int | None = None
     github_status: str | None = None
@@ -155,6 +158,7 @@ class ScaleRequest(BaseModel):
         default=None,
         pattern=r"^[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+$",
     )
+    connection_id: str | None = Field(default=None, pattern=r"^[a-f0-9]{32}$")
 
 
 class TokenCreateRequest(BaseModel):
@@ -164,6 +168,10 @@ class TokenCreateRequest(BaseModel):
 
 
 class GitHubSetupRequest(BaseModel):
+    connection_id: str = Field(
+        default_factory=lambda: uuid.uuid4().hex,
+        pattern=r"^[a-f0-9]{32}$",
+    )
     scope: GitHubScope
     owner: str = Field(pattern=r"^[A-Za-z0-9_.-]+$")
     repository: str | None = Field(default=None, pattern=r"^[A-Za-z0-9_.-]+$")

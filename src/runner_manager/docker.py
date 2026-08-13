@@ -27,6 +27,7 @@ RUNNER_ID_LABEL = "com.easy-runners.runner-id"
 RUNNER_NAME_LABEL = "com.easy-runners.runner-name"
 CREATED_LABEL = "com.easy-runners.created-at"
 REPOSITORY_LABEL = "com.easy-runners.repository"
+CONNECTION_LABEL = "com.easy-runners.connection"
 
 
 class DockerRunnerManager:
@@ -110,6 +111,7 @@ class DockerRunnerManager:
                     created_at=created_at,
                     labels=(labels.get("com.easy-runners.labels") or "").split(","),
                     repository=labels.get(REPOSITORY_LABEL) or None,
+                    connection_id=labels.get(CONNECTION_LABEL) or None,
                     state="exited" if state.get("Status") in {"exited", "dead"} else "starting",
                     exit_code=state.get("ExitCode") if state.get("Status") == "exited" else None,
                 )
@@ -123,6 +125,7 @@ class DockerRunnerManager:
         registration_token: str,
         target_url: str,
         repository: str | None = None,
+        connection_id: str | None = None,
     ) -> ManagedRunner:
         return await asyncio.to_thread(
             self._create_runner,
@@ -131,6 +134,7 @@ class DockerRunnerManager:
             registration_token,
             target_url,
             repository,
+            connection_id,
         )
 
     def _create_runner(
@@ -140,6 +144,7 @@ class DockerRunnerManager:
         registration_token: str,
         target_url: str,
         repository: str | None = None,
+        connection_id: str | None = None,
     ) -> ManagedRunner:
         runner_id = uuid.uuid4().hex
         name = f"er-{self.settings.instance_id}-{pool_name}-{runner_id[:8]}"[:64]
@@ -173,6 +178,8 @@ class DockerRunnerManager:
         }
         if repository:
             labels[REPOSITORY_LABEL] = repository
+        if connection_id:
+            labels[CONNECTION_LABEL] = connection_id
         volumes: dict[str, dict[str, str]] = {}
         group_add: list[int] = []
         if pool.docker_mode == DockerMode.SOCKET:
@@ -218,6 +225,7 @@ class DockerRunnerManager:
             container_id=container.short_id,
             image=image,
             repository=repository,
+            connection_id=connection_id,
         )
         return ManagedRunner(
             runner_id=runner_id,
@@ -228,6 +236,7 @@ class DockerRunnerManager:
             created_at=now,
             labels=sorted(pool.matching_labels),
             repository=repository,
+            connection_id=connection_id,
             state="starting",
         )
 
