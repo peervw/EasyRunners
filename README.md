@@ -464,6 +464,10 @@ after any suspected disclosure.
 - **Webhook rejected:** ensure `PUBLIC_URL` reaches `/webhooks/github` unchanged and the reverse proxy
   does not rewrite the request body.
 - **Docker unavailable:** verify the socket mount, Docker daemon, and `DOCKER_HOST`.
+- **`pull access denied for easy-runners-runner`:** update EasyRunners and redeploy with
+  `docker compose up -d --build`. The source deployment keeps an inert, network-disabled
+  `runner-image` container running so Dokploy and Docker cleanup cannot discard the locally built
+  universal image. Do not configure a Docker Hub image with that name.
 - **Runner registers then exits:** inspect `/data/runner-logs` and verify the pinned runner version is
   accepted by GitHub.
 - **Organization polling is slow:** rely on webhooks for fast scaling, increase the full sweep

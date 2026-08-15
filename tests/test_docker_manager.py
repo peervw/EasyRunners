@@ -5,6 +5,7 @@ from pathlib import Path
 from types import SimpleNamespace
 from typing import Any
 
+import docker as docker_sdk
 import pytest
 
 from runner_manager.docker import DockerRunnerManager, parse_byte_size
@@ -51,9 +52,20 @@ class FakeContainers:
         return self.container
 
 
+class FakeImages:
+    def __init__(self) -> None:
+        self.missing = False
+
+    def get(self, image: str):
+        if self.missing:
+            raise docker_sdk.errors.ImageNotFound(image)
+        return SimpleNamespace(id=f"sha256:{image}")
+
+
 class FakeClient:
     def __init__(self) -> None:
         self.containers = FakeContainers()
+        self.images = FakeImages()
 
     def ping(self) -> bool:
         return True
@@ -115,6 +127,67 @@ async def test_standard_pool_uses_universal_image(settings) -> None:
         "https://github.com/o/r",
     )
     assert client.containers.kwargs["image"] == settings.runner_image
+
+
+@pytest.mark.asyncio
+async def test_missing_local_tag_uses_compose_image_anchor(settings) -> None:
+    client = FakeClient()
+    client.images.missing = True
+    anchor = FakeContainer("anchor123456789")
+    anchor.name = "easy-runners-runner-image-1"
+    anchor.image = SimpleNamespace(id="sha256:anchored-runner-image")
+    client.containers.list = lambda **kwargs: [anchor]
+    manager = DockerRunnerManager(settings, client)
+
+    assert await manager.image_exists(settings.runner_image)
+    await manager.create_runner(
+        "standard",
+        RunnerPoolConfig(labels=["standard"], docker_mode="none"),
+        "token",
+        "https://github.com/o/r",
+    )
+
+    assert client.containers.kwargs["image"] == "sha256:anchored-runner-image"
+
+
+@pytest.mark.asyncio
+async def test_runner_image_anchor_is_scoped_to_this_compose_project(settings) -> None:
+    client = FakeClient()
+    client.images.missing = True
+    client.containers.container.attrs = {
+        "Config": {"Labels": {"com.docker.compose.project": "current-project"}}
+    }
+    anchor = FakeContainer("current-project-anchor")
+    anchor.image = SimpleNamespace(id="sha256:current-project-image")
+
+    def list_containers(**kwargs):
+        assert kwargs["filters"]["label"] == [
+            "com.easy-runners.runner-image=true",
+            "com.docker.compose.project=current-project",
+        ]
+        return [anchor]
+
+    client.containers.list = list_containers
+    manager = DockerRunnerManager(settings, client)
+
+    assert manager._resolve_image(settings.runner_image) == (
+        "sha256:current-project-image"
+    )
+
+
+@pytest.mark.asyncio
+async def test_missing_source_image_has_actionable_error(settings) -> None:
+    client = FakeClient()
+    client.images.missing = True
+    manager = DockerRunnerManager(settings, client)
+
+    with pytest.raises(RuntimeError, match="runner-image service is running"):
+        await manager.create_runner(
+            "standard",
+            RunnerPoolConfig(labels=["standard"], docker_mode="none"),
+            "token",
+            "https://github.com/o/r",
+        )
 
 
 @pytest.mark.asyncio
