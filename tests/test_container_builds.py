@@ -51,6 +51,11 @@ def test_one_compose_builds_every_image_from_source() -> None:
     assert services["runner-image"]["build"]["target"] == "runner"
     assert "RUST_TOOLCHAIN" in services["runner-image"]["build"]["args"]
     assert set(services["manager"]["depends_on"]) == {"runner-image"}
+    assert services["manager"]["depends_on"]["runner-image"]["condition"] == "service_started"
+    assert services["runner-image"]["labels"]["com.easy-runners.runner-image"] == "true"
+    assert services["runner-image"]["restart"] == "unless-stopped"
+    assert services["runner-image"]["network_mode"] == "none"
+    assert services["runner-image"]["read_only"] is True
     runner_dockerfile = (REPOSITORY_ROOT / "runner" / "Dockerfile").read_text()
     assert len(re.findall(r"^FROM ", runner_dockerfile, flags=re.MULTILINE)) == 1
     assert "rustup toolchain install" in runner_dockerfile

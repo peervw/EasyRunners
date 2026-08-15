@@ -4,6 +4,7 @@ import asyncio
 import os
 import re
 import shutil
+import socket
 import stat
 import uuid
 from datetime import UTC, datetime
@@ -28,6 +29,9 @@ RUNNER_NAME_LABEL = "com.easy-runners.runner-name"
 CREATED_LABEL = "com.easy-runners.created-at"
 REPOSITORY_LABEL = "com.easy-runners.repository"
 CONNECTION_LABEL = "com.easy-runners.connection"
+RUNNER_IMAGE_LABEL = "com.easy-runners.runner-image"
+COMPOSE_PROJECT_LABEL = "com.docker.compose.project"
+COMPOSE_SERVICE_LABEL = "com.docker.compose.service"
 
 
 class DockerRunnerManager:
@@ -48,12 +52,79 @@ class DockerRunnerManager:
 
     async def image_exists(self, image: str) -> bool:
         try:
-            await asyncio.to_thread(self.client.images.get, image)
-        except (docker_sdk.errors.ImageNotFound, docker_sdk.errors.NotFound):
-            return False
+            await asyncio.to_thread(self._resolve_image, image)
         except Exception:
             return False
         return True
+
+    def _resolve_image(self, image: str) -> str:
+        try:
+            self.client.images.get(image)
+            return image
+        except (docker_sdk.errors.ImageNotFound, docker_sdk.errors.NotFound):
+            pass
+
+        if image == self.settings.runner_image:
+            anchors = self._compose_image_anchors()
+            for anchor in sorted(
+                anchors,
+                key=lambda container: container.status == "running",
+                reverse=True,
+            ):
+                anchor_image = anchor.image
+                image_id = str(anchor_image.id) if anchor_image else ""
+                if image_id:
+                    log.warning(
+                        "runner.image_resolved_from_anchor",
+                        configured_image=image,
+                        resolved_image=image_id,
+                        anchor=anchor.name,
+                    )
+                    return image_id
+
+            if "/" not in image:
+                raise RuntimeError(
+                    f"runner image {image!r} is not available on this Docker host; "
+                    "redeploy EasyRunners with docker compose up -d --build so the "
+                    "runner-image service is running"
+                )
+
+        # Preserve registry-backed custom images: Docker SDK will pull these
+        # on first use exactly as it did before local image anchoring existed.
+        return image
+
+    def _compose_image_anchors(self) -> list[Container]:
+        project = self._compose_project()
+        labels = [f"{RUNNER_IMAGE_LABEL}=true"]
+        if project:
+            labels.append(f"{COMPOSE_PROJECT_LABEL}={project}")
+        anchors = self.client.containers.list(
+            all=True,
+            filters={"label": labels},
+        )
+        if anchors or not project:
+            return anchors
+
+        # Before the anchor label existed, Compose still left an exited helper
+        # container behind. Use it only when it belongs to this manager's
+        # project so two EasyRunners deployments cannot borrow each other's image.
+        return self.client.containers.list(
+            all=True,
+            filters={
+                "label": [
+                    f"{COMPOSE_PROJECT_LABEL}={project}",
+                    f"{COMPOSE_SERVICE_LABEL}=runner-image",
+                ]
+            },
+        )
+
+    def _compose_project(self) -> str | None:
+        try:
+            manager = self.client.containers.get(socket.gethostname())
+            labels = manager.attrs.get("Config", {}).get("Labels", {}) or {}
+            return str(labels[COMPOSE_PROJECT_LABEL]) or None
+        except (docker_sdk.errors.NotFound, KeyError, AttributeError):
+            return None
 
     async def host_resources(self) -> dict[str, Any]:
         if (
@@ -149,7 +220,8 @@ class DockerRunnerManager:
         runner_id = uuid.uuid4().hex
         name = f"er-{self.settings.instance_id}-{pool_name}-{runner_id[:8]}"[:64]
         now = datetime.now(UTC)
-        image = self.settings.image_for_pool(pool)
+        configured_image = self.settings.image_for_pool(pool)
+        image = self._resolve_image(configured_image)
         environment = {
             "RUNNER_NAME": name,
             "RUNNER_URL": target_url,
@@ -224,6 +296,7 @@ class DockerRunnerManager:
             pool=pool_name,
             container_id=container.short_id,
             image=image,
+            configured_image=configured_image,
             repository=repository,
             connection_id=connection_id,
         )

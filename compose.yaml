@@ -12,8 +12,18 @@ services:
         RUNNER_SHA256_X64: ${RUNNER_SHA256_X64:-04cf0be1aff4c3ec3554466c39124ca250e3effd8873bb7e8d68535aa9505d5d}
         RUNNER_SHA256_ARM64: ${RUNNER_SHA256_ARM64:-58b758e420b87093fbd4bfddd368074960053e2f1388f01848c82624b90f27d1}
         RUST_TOOLCHAIN: ${RUST_TOOLCHAIN:-stable}
-    entrypoint: ["/bin/true"]
-    restart: "no"
+    # Keep one inert container alive as an image anchor. Some deployment
+    # platforms remove tags or stopped build-helper containers after deploy;
+    # the manager can always resolve the exact local image ID from this anchor.
+    entrypoint: ["/usr/bin/tail", "-f", "/dev/null"]
+    labels:
+      com.easy-runners.runner-image: "true"
+    network_mode: none
+    read_only: true
+    cap_drop: [ALL]
+    security_opt:
+      - no-new-privileges:true
+    restart: unless-stopped
 
   manager:
     image: ${MANAGER_IMAGE:-easy-runners-manager:latest}
@@ -23,7 +33,7 @@ services:
       target: manager
     depends_on:
       runner-image:
-        condition: service_completed_successfully
+        condition: service_started
     env_file:
       - path: .env
         required: false
