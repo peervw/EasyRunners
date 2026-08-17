@@ -326,7 +326,6 @@ async def api_pools(
 async def api_repository_adoption(
     request: Request,
     _: Annotated[AuthContext, Depends(require_auth)],
-    refresh: bool = False,
 ) -> dict[str, Any]:
     if not _store(request).all_credentials():
         return {
@@ -347,7 +346,21 @@ async def api_repository_adoption(
         }
     return await _github(request).repository_adoption(
         _scheduler(request).settings.runner_pools,
-        refresh=refresh,
+        refresh=False,
+        wait=False,
+    )
+
+
+@router.post("/api/repositories/adoption/scan")
+async def api_scan_repository_adoption(
+    request: Request,
+    _: Annotated[AuthContext, Depends(require_mutation)],
+) -> dict[str, Any]:
+    if not _store(request).all_credentials():
+        raise HTTPException(status_code=409, detail="GitHub is not connected")
+    return await _github(request).repository_adoption(
+        _scheduler(request).settings.runner_pools,
+        refresh=True,
         wait=False,
     )
 
@@ -732,6 +745,10 @@ async def api_delete_token(
 async def api_github(
     request: Request, _: Annotated[AuthContext, Depends(require_auth)]
 ) -> dict[str, Any]:
+    github = _github(request)
+    repository_errors = github.repository_errors
+    runner_errors = github.runner_errors
+    queue_errors = github.queue_errors
     items: list[dict[str, Any]] = []
     all_repositories: list[str] = []
     for original in _store(request).connections():
@@ -741,17 +758,20 @@ async def api_github(
         repositories_error: str | None = None
         if connection.installation_id:
             try:
-                connection = await _github(request).refresh_installation_metadata(
-                    connection.id
-                )
-            except (httpx.HTTPError, RuntimeError, ValueError) as exc:
-                metadata_error = str(exc)
-            try:
-                repositories = await _github(request).list_repositories(
-                    connection_id=connection.id
-                )
-            except (httpx.HTTPError, RuntimeError, ValueError) as exc:
+                repositories = github.cached_repositories(connection.id)
+            except (KeyError, RuntimeError, ValueError) as exc:
                 repositories_error = str(exc)
+            repositories_error = repositories_error or repository_errors.get(connection.id)
+        rate_limit = (
+            github.rate_limit_status(connection.id)
+            if connection.installation_id
+            else {"remaining": None, "reset_at": None, "limited_until": None}
+        )
+        operational_error = (
+            repositories_error
+            or runner_errors.get(connection.id)
+            or queue_errors.get(connection.id)
+        )
         all_repositories.extend(repositories)
         configure_path = (
             f"/organizations/{quote(connection.owner)}/settings/installations"
@@ -772,13 +792,9 @@ async def api_github(
                 "metadata_error": metadata_error,
                 "repositories_error": repositories_error,
                 "healthy": bool(connection.installation_id)
-                and not metadata_error
-                and not repositories_error,
-                "rate_limit": (
-                    _github(request).rate_limit_status(connection.id)
-                    if connection.installation_id
-                    else {"remaining": None, "reset_at": None, "limited_until": None}
-                ),
+                and not operational_error
+                and not rate_limit.get("limited_until"),
+                "rate_limit": rate_limit,
                 "configure_url": configure_url,
                 "repository_bound": connection.scope == GitHubScope.REPO,
                 "last_webhook_at": _database(request).get_setting(
@@ -798,6 +814,33 @@ async def api_github(
         "rate_limit": primary["rate_limit"] if primary else {"remaining": None},
         "configure_url": primary["configure_url"] if primary else None,
         "repository_bound": bool(primary and primary["repository_bound"]),
+    }
+
+
+@router.post("/api/github/connections/{connection_id}/refresh")
+async def github_refresh_connection(
+    request: Request,
+    connection_id: str,
+    _: Annotated[AuthContext, Depends(require_mutation)],
+) -> dict[str, Any]:
+    connection = _store(request).connection(connection_id)
+    if not connection:
+        raise HTTPException(status_code=404, detail="unknown GitHub connection")
+    if not connection.installation_id:
+        raise HTTPException(status_code=409, detail="GitHub App installation is incomplete")
+    try:
+        connection = await _github(request).refresh_installation_metadata(
+            connection_id, refresh=True
+        )
+        repositories = await _github(request).list_repositories(
+            connection_id=connection_id, refresh=True
+        )
+    except (httpx.HTTPError, RuntimeError, ValueError) as exc:
+        raise HTTPException(status_code=502, detail=str(exc)) from exc
+    return {
+        "connection": connection.model_dump(mode="json"),
+        "repositories": repositories,
+        "rate_limit": _github(request).rate_limit_status(connection_id),
     }
 
 

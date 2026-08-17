@@ -4,7 +4,6 @@ import json
 from datetime import UTC, datetime
 from typing import Any
 
-import httpx
 import pytest
 from fastapi.testclient import TestClient
 from pydantic import SecretStr
@@ -232,14 +231,10 @@ def test_github_status_lists_selected_repositories(client, monkeypatch) -> None:
     )
     app.state.github_store.save_installation(2, repository_selection="selected")
 
-    async def metadata(connection_id, *, refresh=False):
-        return app.state.github_store.credentials().connection
-
-    async def repositories(*, connection_id=None, refresh=False):
+    def repositories(connection_id):
         return ["peer/one", "peer/two"]
 
-    monkeypatch.setattr(app.state.github, "refresh_installation_metadata", metadata)
-    monkeypatch.setattr(app.state.github, "list_repositories", repositories)
+    monkeypatch.setattr(app.state.github, "cached_repositories", repositories)
     response = test_client.get("/api/github")
     assert response.status_code == 200
     assert response.json()["repositories"] == ["peer/one", "peer/two"]
@@ -247,7 +242,7 @@ def test_github_status_lists_selected_repositories(client, monkeypatch) -> None:
     assert response.json()["configure_url"].endswith("/settings/installations/2")
 
 
-def test_github_status_lists_repositories_when_metadata_refresh_fails(
+def test_github_status_is_cache_only(
     client, monkeypatch
 ) -> None:
     test_client, app = client
@@ -258,21 +253,59 @@ def test_github_status_lists_repositories_when_metadata_refresh_fails(
     )
     app.state.github_store.save_installation(2, repository_selection="selected")
 
-    async def metadata(connection_id, *, refresh=False):
-        raise httpx.HTTPError("installation metadata unavailable")
-
-    async def repositories(*, connection_id=None, refresh=False):
+    def repositories(connection_id):
         return ["peer/one", "peer/two"]
 
-    monkeypatch.setattr(app.state.github, "refresh_installation_metadata", metadata)
-    monkeypatch.setattr(app.state.github, "list_repositories", repositories)
+    async def remote_call(*args, **kwargs):
+        raise AssertionError("dashboard refresh must not call GitHub")
+
+    monkeypatch.setattr(app.state.github, "cached_repositories", repositories)
+    monkeypatch.setattr(app.state.github, "refresh_installation_metadata", remote_call)
+    monkeypatch.setattr(app.state.github, "list_repositories", remote_call)
 
     response = test_client.get("/api/github")
 
     assert response.status_code == 200
     assert response.json()["repositories"] == ["peer/one", "peer/two"]
-    assert response.json()["metadata_error"] == "installation metadata unavailable"
+    assert response.json()["metadata_error"] is None
     assert response.json()["repositories_error"] is None
+
+
+def test_github_connection_refresh_is_explicit_and_csrf_protected(
+    client, monkeypatch
+) -> None:
+    test_client, app = client
+    _, csrf = login(test_client, app)
+    app.state.github_store.save_manifest_result(
+        GitHubSetupRequest(scope="repo", owner="peer"),
+        {"id": 1, "slug": "easy", "pem": "PRIVATE", "webhook_secret": "secret"},
+    )
+    connection = app.state.github_store.save_installation(
+        2, repository_selection="selected"
+    )
+    calls: list[str] = []
+
+    async def metadata(connection_id, *, refresh=False):
+        assert connection_id == connection.id
+        assert refresh is True
+        calls.append("metadata")
+        return connection
+
+    async def repositories(*, connection_id=None, refresh=False):
+        assert connection_id == connection.id
+        assert refresh is True
+        calls.append("repositories")
+        return ["peer/one", "peer/two"]
+
+    monkeypatch.setattr(app.state.github, "refresh_installation_metadata", metadata)
+    monkeypatch.setattr(app.state.github, "list_repositories", repositories)
+
+    path = f"/api/github/connections/{connection.id}/refresh"
+    assert test_client.post(path).status_code == 403
+    response = test_client.post(path, headers={"X-CSRF-Token": csrf})
+    assert response.status_code == 200
+    assert response.json()["repositories"] == ["peer/one", "peer/two"]
+    assert calls == ["metadata", "repositories"]
 
 
 def test_github_status_and_disconnect_are_connection_scoped(client, monkeypatch) -> None:
@@ -297,17 +330,13 @@ def test_github_status_and_disconnect_are_connection_scoped(client, monkeypatch)
         )
         app.state.github_store.save_installation(setup.connection_id, installation)
 
-    async def metadata(connection_id, *, refresh=False):
-        return app.state.github_store.connection(connection_id)
-
-    async def repositories(*, connection_id=None, refresh=False):
+    def repositories(connection_id):
         return {
             peer.connection_id: ["peer/one"],
             acme.connection_id: ["acme/service"],
         }[connection_id]
 
-    monkeypatch.setattr(app.state.github, "refresh_installation_metadata", metadata)
-    monkeypatch.setattr(app.state.github, "list_repositories", repositories)
+    monkeypatch.setattr(app.state.github, "cached_repositories", repositories)
     response = test_client.get("/api/github")
     assert response.status_code == 200
     body = response.json()
@@ -423,10 +452,12 @@ def test_repository_adoption_and_notification_endpoints(client, monkeypatch) -> 
     )
     app.state.github_store.save_installation(2)
 
+    refreshes: list[bool] = []
+
     async def adoption(pools, *, refresh=False, wait=True):
         assert "default" in pools
-        assert refresh is True
         assert wait is False
+        refreshes.append(refresh)
         return {
             "repositories": [
                 {"repository": "peer/repo", "status": "needs_migration"}
@@ -448,9 +479,14 @@ def test_repository_adoption_and_notification_endpoints(client, monkeypatch) -> 
     monkeypatch.setattr(app.state.github, "repository_adoption", adoption)
     monkeypatch.setattr(app.state.notifications, "send", send)
 
-    response = test_client.get("/api/repositories/adoption?refresh=true")
+    response = test_client.get("/api/repositories/adoption")
     assert response.status_code == 200
     assert response.json()["repositories"][0]["status"] == "needs_migration"
+    scanned = test_client.post(
+        "/api/repositories/adoption/scan", headers={"X-CSRF-Token": csrf}
+    )
+    assert scanned.status_code == 200
+    assert refreshes == [False, True]
     assert test_client.get("/api/notifications").json()["configured"] is True
     tested = test_client.post(
         "/api/notifications/test", headers={"X-CSRF-Token": csrf}

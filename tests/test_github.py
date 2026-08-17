@@ -196,6 +196,94 @@ async def test_registry_routes_registration_tokens_to_the_right_account(
 
 
 @pytest.mark.asyncio
+async def test_registry_makes_no_runner_requests_for_an_idle_installation(tmp_path) -> None:
+    requests: list[str] = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        requests.append(request.url.path)
+        return httpx.Response(500, request=request)
+
+    settings = Settings(
+        public_url="https://runners.example.com",
+        data_dir=tmp_path,
+        config_path=tmp_path / "none",
+        github_auth_mode="onboarding",
+        runner_pools={"default": RunnerPoolConfig(labels=["docker"])},
+    )
+    database = Database(tmp_path / "state.sqlite3")
+    store = GitHubConnectionStore(settings, database)
+    setup = GitHubSetupRequest(connection_id="a" * 32, scope="repo", owner="peer")
+    store.save_manifest_result(
+        setup,
+        {"id": 1, "slug": "easy", "pem": "PRIVATE", "webhook_secret": "hook"},
+    )
+    store.save_installation(setup.connection_id, 11)
+    http = httpx.AsyncClient(transport=httpx.MockTransport(handler))
+    registry = GitHubClientRegistry(settings, store, http)
+
+    assert await registry.list_runners([], connection_ids=set()) == []
+    assert requests == []
+
+    await registry.close()
+    await http.aclose()
+    database.close()
+
+
+@pytest.mark.asyncio
+async def test_registry_checks_an_active_organization_connection(
+    tmp_path, monkeypatch
+) -> None:
+    requests: list[str] = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        requests.append(request.url.path)
+        if request.url.path == "/app/installations/22/access_tokens":
+            return httpx.Response(
+                201,
+                json={"token": "org-token", "expires_at": "2099-01-01T00:00:00Z"},
+            )
+        if request.url.path == "/orgs/acme/actions/runners":
+            return httpx.Response(200, json={"runners": []})
+        raise AssertionError(request.url)
+
+    settings = Settings(
+        public_url="https://runners.example.com",
+        data_dir=tmp_path,
+        config_path=tmp_path / "none",
+        github_auth_mode="onboarding",
+        runner_pools={"default": RunnerPoolConfig(labels=["docker"])},
+    )
+    database = Database(tmp_path / "state.sqlite3")
+    store = GitHubConnectionStore(settings, database)
+    setup = GitHubSetupRequest(
+        connection_id="b" * 32,
+        scope="org",
+        owner="acme",
+        app_owner_kind="organization",
+    )
+    store.save_manifest_result(
+        setup,
+        {"id": 2, "slug": "easy", "pem": "PRIVATE", "webhook_secret": "hook"},
+    )
+    store.save_installation(setup.connection_id, 22)
+    http = httpx.AsyncClient(transport=httpx.MockTransport(handler))
+    registry = GitHubClientRegistry(settings, store, http)
+    monkeypatch.setattr("runner_manager.github.GitHubAuth.app_jwt", lambda *args: "jwt")
+
+    assert await registry.list_runners(
+        [], connection_ids={setup.connection_id}
+    ) == []
+    assert requests == [
+        "/app/installations/22/access_tokens",
+        "/orgs/acme/actions/runners",
+    ]
+
+    await registry.close()
+    await http.aclose()
+    database.close()
+
+
+@pytest.mark.asyncio
 async def test_one_url_setup_detects_owner_kind_and_polling_mode(tmp_path) -> None:
     def handler(request: httpx.Request) -> httpx.Response:
         assert request.url.path == "/users/peervw"
@@ -524,7 +612,14 @@ async def test_rate_limit_stops_repeat_requests_until_retry_window(tmp_path, mon
         if request.url.path == "/installation/repositories":
             return httpx.Response(
                 429,
-                headers={"Retry-After": "120", "X-RateLimit-Remaining": "0"},
+                headers={
+                    "Retry-After": "120",
+                    "X-RateLimit-Limit": "5000",
+                    "X-RateLimit-Remaining": "0",
+                    "X-RateLimit-Used": "5000",
+                    "X-RateLimit-Resource": "core",
+                    "X-RateLimit-Reset": "4070908800",
+                },
                 json={"message": "rate limited"},
             )
         raise AssertionError(request.url)
@@ -542,7 +637,61 @@ async def test_rate_limit_stops_repeat_requests_until_retry_window(tmp_path, mon
     with pytest.raises(GitHubRateLimitError):
         await client.list_repositories(refresh=True)
     assert len(calls) == first_count
-    assert client.rate_limit_status()["limited_until"] is not None
+    status = client.rate_limit_status()
+    assert status["limited_until"] is not None
+    assert status["limit"] == 5000
+    assert status["remaining"] == 0
+    assert status["used"] == 5000
+    assert status["resource"] == "core"
+    assert status["limit_kind"] == "primary"
+    assert status["observed_requests"] == 1
+    assert status["operations"] == [
+        {
+            "operation": "list_repositories",
+            "requests": 1,
+            "errors": 1,
+            "rate_limited": 1,
+            "statuses": {"429": 1},
+            "last_request_at": status["operations"][0]["last_request_at"],
+        }
+    ]
+    await client.close()
+    database.close()
+
+
+@pytest.mark.asyncio
+async def test_secondary_rate_limit_uses_exponential_backoff(tmp_path, monkeypatch) -> None:
+    def handler(request: httpx.Request) -> httpx.Response:
+        if request.url.path == "/app/installations/99/access_tokens":
+            return httpx.Response(
+                201,
+                json={"token": "ghs", "expires_at": "2099-01-01T00:00:00Z"},
+            )
+        if request.url.path == "/installation/repositories":
+            return httpx.Response(
+                429,
+                json={"message": "You have exceeded a secondary rate limit."},
+            )
+        raise AssertionError(request.url)
+
+    client, store, database = make_stack(tmp_path, handler)
+    store.save_manifest_result(
+        GitHubSetupRequest(scope="repo", owner="peer"),
+        {"id": 12, "slug": "easy", "pem": "PRIVATE", "webhook_secret": "hook"},
+    )
+    store.save_installation(99)
+    monkeypatch.setattr(client.auth, "app_jwt", lambda *args: "jwt")
+
+    with pytest.raises(GitHubRateLimitError):
+        await client.list_repositories(refresh=True)
+    assert client.rate_limit_status()["retry_after_seconds"] == 60
+    client._rate_limited_until = 0
+    with pytest.raises(GitHubRateLimitError):
+        await client.list_repositories(refresh=True)
+    status = client.rate_limit_status()
+    assert status["retry_after_seconds"] == 120
+    assert status["operations"][0]["rate_limited"] == 2
+
     await client.close()
     database.close()
 
@@ -647,7 +796,7 @@ async def test_repository_adoption_finds_hosted_jobs_and_exact_replacement(
         "standard": RunnerPoolConfig(labels=["standard"], docker_mode=DockerMode.NONE),
         "docker": RunnerPoolConfig(labels=["docker"], docker_mode=DockerMode.SOCKET),
     }
-    adoption = await client.repository_adoption(pools)
+    adoption = await client.repository_adoption(pools, refresh=True)
     by_repository = {item["repository"]: item for item in adoption["repositories"]}
     assert by_repository["peer/hosted"]["status"] == "needs_migration"
     assert (
@@ -667,6 +816,29 @@ async def test_repository_adoption_finds_hosted_jobs_and_exact_replacement(
     )
     assert cached["recommended_pool"] == "safe"
     assert cached["recommended_runs_on"] == "runs-on: [self-hosted, linux, safe]"
+    await client.close()
+    database.close()
+
+
+@pytest.mark.asyncio
+async def test_repository_adoption_is_cache_only_until_manually_started(
+    tmp_path, monkeypatch
+) -> None:
+    client, _, database = make_stack(
+        tmp_path,
+        lambda request: pytest.fail(f"unexpected GitHub request: {request.url}"),
+    )
+    monkeypatch.setattr(client, "cached_repositories", lambda: ["peer/repo"])
+    pools = {
+        "standard": RunnerPoolConfig(labels=["standard"], docker_mode=DockerMode.NONE)
+    }
+
+    result = await client.repository_adoption(pools, wait=False)
+
+    assert result["scan"]["scanning"] is False
+    assert result["repository_count_scanned"] == 0
+    assert result["next_scan_estimated_requests"] == {"minimum": 2, "maximum": 7}
+    assert client._adoption_task is None
     await client.close()
     database.close()
 
@@ -699,13 +871,14 @@ async def test_repository_adoption_runs_in_background_and_reports_progress(
         }
 
     monkeypatch.setattr(client, "list_repositories", list_repositories)
+    monkeypatch.setattr(client, "cached_repositories", lambda: repositories)
     monkeypatch.setattr(client, "_repository_adoption", scan)
     client.settings.poll_concurrency = 2
     pools = {
         "standard": RunnerPoolConfig(labels=["standard"], docker_mode=DockerMode.NONE)
     }
 
-    initial = await client.repository_adoption(pools, wait=False)
+    initial = await client.repository_adoption(pools, refresh=True, wait=False)
     assert initial["scan"]["scanning"] is True
     assert initial["scan"]["total"] == 3
     await started.wait()

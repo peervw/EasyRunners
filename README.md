@@ -305,14 +305,18 @@ uses a different layout.
 ### Scaling behavior
 
 - `workflow_job` webhooks trigger immediate reconciliation.
-- REST polling enumerates the App installation's selected repositories to repair missed events and
-  restore demand after restart.
+- REST polling repairs missed events and restores demand after restart. The default full sweep runs
+  every 15 minutes; between sweeps, runner status is requested only for repositories and
+  organization connections with active jobs or containers. An idle manager performs no runner
+  discovery requests.
 - Personal-account capacity is repository-bound. Pool maximums apply across all selected
   repositories, and the oldest queued matching jobs receive available slots first.
 - A non-zero pool minimum uses the first selected repository; explicit dashboard pre-warming names
   the repository and is clearer for multi-repository installations.
-- Organization polling enumerates App installation repositories because GitHub has no single API
+- Organization job polling enumerates App installation repositories because GitHub has no single API
   endpoint for all queued organization jobs grouped by runner labels.
+- Workflow migration scans are manual and display their estimated GitHub API request cost before
+  they start. Opening the dashboard never starts a remote scan.
 - Starting containers count toward capacity. Busy runners are never stopped for ordinary scale-down.
 - Idle excess waits for `idle_timeout` and an assignment grace period.
 - Dashboard pre-warming is a temporary desired-capacity floor, not a permanent config change. A
@@ -380,8 +384,10 @@ Endpoints:
 - `GET /health` — intentionally minimal unauthenticated liveness
 - `GET /api/status`, `/api/runners`, `/api/pools`, `/api/history`, `/api/usage`
 - `GET /api/readiness` and `/api/version`
-- `GET /api/repositories/adoption` for cached workflow-label migration status and background scan
-  progress; append `?refresh=true` to start a new scan
+- `GET /api/repositories/adoption` for cached workflow-label migration status and scan progress;
+  `POST /api/repositories/adoption/scan` starts an explicit scan
+- `POST /api/github/connections/{connection_id}/refresh` refreshes installation metadata and
+  repository access; ordinary dashboard refreshes use cached data only
 - `GET /api/notifications` and `POST /api/notifications/test`
 - `GET /api/jobs` for queued and in-progress workflow jobs
 - `GET /api/diagnostics` and `/api/diagnostics/{name}` for retained runner archives; `DELETE
@@ -393,6 +399,11 @@ Endpoints:
   "owner/repository"}`
 - `POST /api/readiness/test-runner?pool=standard&connection_id=…&repository=owner/repository` to
   pre-warm one runner for five minutes
+
+The GitHub settings card shows the primary quota and operations observed since the manager started.
+Prometheus exposes the same traffic as
+`github_runner_manager_github_api_requests_total{connection,operation,method,status}` and quota as
+`github_runner_manager_github_rate_limit_remaining{connection}`.
 - `POST /api/reconcile`
 - `GET|POST /api/auth/tokens` and `DELETE /api/auth/tokens/{id}`
 - `GET /api/github`, setup routes, and `POST /api/github/connections/{id}/disconnect`
@@ -461,6 +472,9 @@ after any suspected disclosure.
   appears in the dashboard's GitHub repository list or organization runner group.
 - **GitHub disconnected:** inspect `docker compose logs manager` for permission or installation-token
   errors. Reapprove changed App permissions in GitHub.
+- **GitHub API 403/429:** Settings shows each connection's primary quota, reset time, local request
+  total, and operations since manager startup. EasyRunners honors primary reset headers and uses
+  exponential backoff for secondary limits. Idle installations do not poll repository runners.
 - **Webhook rejected:** ensure `PUBLIC_URL` reaches `/webhooks/github` unchanged and the reverse proxy
   does not rewrite the request body.
 - **Docker unavailable:** verify the socket mount, Docker daemon, and `DOCKER_HOST`.

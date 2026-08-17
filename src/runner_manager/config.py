@@ -37,8 +37,8 @@ class Settings(BaseSettings):
 
     reconcile_interval: int = 10
     queue_poll_interval: int = 60
-    full_poll_interval: int = 300
-    poll_concurrency: int = 5
+    full_poll_interval: int = 900
+    poll_concurrency: int = 2
     poll_max_repositories: int = 500
     poll_runs_per_repo: int = 20
     assignment_grace_seconds: int = 15
@@ -48,9 +48,8 @@ class Settings(BaseSettings):
     runner_log_retention_days: int = 7
     cleanup_idle_on_shutdown: bool = False
     webhook_enabled: bool = True
-    adoption_scan_interval: int = 600
     adoption_runs_per_repo: int = 5
-    # Repositories checked per background pass; later passes prioritize remaining work.
+    # Repositories checked per manual scan; later scans prioritize remaining work.
     adoption_max_repositories: int = 100
     host_resource_cache_seconds: int = 15
 

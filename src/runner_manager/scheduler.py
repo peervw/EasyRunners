@@ -14,7 +14,7 @@ import structlog
 from runner_manager.config import Settings
 from runner_manager.demand import DemandTracker
 from runner_manager.docker import DockerRunnerManager, parse_byte_size
-from runner_manager.github import GitHubClientRegistry
+from runner_manager.github import GitHubClientRegistry, GitHubRateLimitError
 from runner_manager.metrics import RECONCILE_DURATION, RUNNER_CREATION_FAILURES, RUNNERS
 from runner_manager.models import GitHubScope, ManagedRunner, RunnerPoolConfig
 from runner_manager.notifications import NotificationManager
@@ -137,6 +137,11 @@ class Scheduler:
                 self._last_full_poll = now
             self._last_queue_poll = now
             log.info("scheduler.queue_poll", full=full, queued=len(jobs))
+        except GitHubRateLimitError as exc:
+            self._github_connected = False
+            self._last_error = str(exc)
+            log.warning("scheduler.queue_poll_rate_limited", full=full, error=str(exc))
+            await self._notify_github_unhealthy(str(exc), operation="queue_poll")
         except Exception as exc:
             self._github_connected = False
             self._last_error = str(exc)
@@ -311,14 +316,14 @@ class Scheduler:
                     >= self.settings.full_poll_interval
                 )
                 repositories: list[str] | None = None
+                active_connection_ids: set[str] | None = None
                 if full_sweep:
-                    self._last_runner_sweep = monotonic()
                     repositories = []
                     for connection in connections.values():
                         try:
                             connection_repositories = await self.github.list_repositories(
                                 connection_id=connection.id,
-                                refresh=True,
+                                refresh=False,
                             )
                         except Exception as exc:
                             await self._notify_github_unhealthy(
@@ -352,9 +357,31 @@ class Scheduler:
                             ),
                         }
                     )
+                    active_connection_ids = {
+                        *(
+                            runner.connection_id
+                            for runner in containers
+                            if runner.connection_id
+                        ),
+                        *(job.connection_id for job in jobs if job.connection_id),
+                        *(
+                            connection_id
+                            for _, connection_id, _ in self._manual
+                            if connection_id
+                        ),
+                    }
+                    for job in jobs:
+                        if job.connection_id:
+                            continue
+                        connection = self.github.connection_for_repository(job.repository)
+                        if connection:
+                            active_connection_ids.add(connection.id)
                 github_runners = await self.github.list_runners(
-                    None if full_sweep else repositories
+                    None if full_sweep else repositories,
+                    connection_ids=active_connection_ids,
                 )
+                if full_sweep:
+                    self._last_runner_sweep = monotonic()
                 runner_errors = getattr(self.github, "runner_errors", {})
                 self._github_connected = len(runner_errors) < len(connections)
                 for connection_id, error in runner_errors.items():

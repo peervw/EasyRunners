@@ -1,11 +1,11 @@
 manager:
   reconcile_interval: 10
   queue_poll_interval: 60
-  full_poll_interval: 300
-  poll_concurrency: 5
-  # Workflow migration scans run in the background. This limits repositories
-  # per pass; new and unverified repositories are checked first.
-  adoption_scan_interval: 600
+  # Webhooks provide immediate scaling. This slower sweep only repairs missed events.
+  full_poll_interval: 900
+  poll_concurrency: 2
+  # Workflow migration scans run only when requested from the dashboard. This
+  # limits repositories per scan; new and unverified repositories are checked first.
   adoption_runs_per_repo: 5
   adoption_max_repositories: 100
   history_limit: 500
