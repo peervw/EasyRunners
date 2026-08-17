@@ -4,6 +4,7 @@ import asyncio
 import secrets
 import time
 import uuid
+from collections import Counter
 from dataclasses import dataclass
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
@@ -17,7 +18,11 @@ from pydantic import BaseModel
 
 from runner_manager.config import Settings
 from runner_manager.database import Database
-from runner_manager.metrics import GITHUB_API_FAILURES, GITHUB_RATE_LIMIT_REMAINING
+from runner_manager.metrics import (
+    GITHUB_API_FAILURES,
+    GITHUB_API_REQUESTS,
+    GITHUB_RATE_LIMIT_REMAINING,
+)
 from runner_manager.models import (
     ARCHITECTURE_LABELS,
     DockerMode,
@@ -506,8 +511,18 @@ class GitHubClient:
         self._adoption_scan_error: str | None = None
         self._installation_metadata_at = 0.0
         self._rate_limited_until = 0.0
+        self._rate_limit_kind: str | None = None
+        self._rate_limit_limit: int | None = None
         self._rate_limit_remaining: int | None = None
+        self._rate_limit_used: int | None = None
+        self._rate_limit_resource: str | None = None
         self._rate_limit_reset_at: datetime | None = None
+        self._retry_after_seconds: float | None = None
+        self._secondary_backoff_seconds = 60.0
+        self._request_counts: Counter[tuple[str, int]] = Counter()
+        self._request_rate_limited: Counter[str] = Counter()
+        self._request_last_at: dict[str, datetime] = {}
+        self._request_observed_since = datetime.now(UTC)
 
     def credentials(self, *, require_installation: bool = True) -> Credentials | None:
         return self.store.credentials(
@@ -541,8 +556,38 @@ class GitHubClient:
         return self.auth._headers(token)
 
     def rate_limit_status(self) -> dict[str, Any]:
+        operations: list[dict[str, Any]] = []
+        for operation in sorted(
+            {name for name, _ in self._request_counts},
+            key=lambda name: sum(
+                count
+                for (candidate, _), count in self._request_counts.items()
+                if candidate == name
+            ),
+            reverse=True,
+        ):
+            statuses = {
+                str(status): count
+                for (candidate, status), count in sorted(self._request_counts.items())
+                if candidate == operation
+            }
+            operations.append(
+                {
+                    "operation": operation,
+                    "requests": sum(statuses.values()),
+                    "errors": sum(
+                        count for status, count in statuses.items() if int(status) >= 400
+                    ),
+                    "rate_limited": self._request_rate_limited[operation],
+                    "statuses": statuses,
+                    "last_request_at": self._request_last_at[operation].isoformat(),
+                }
+            )
         return {
+            "limit": self._rate_limit_limit,
             "remaining": self._rate_limit_remaining,
+            "used": self._rate_limit_used,
+            "resource": self._rate_limit_resource,
             "reset_at": self._rate_limit_reset_at.isoformat()
             if self._rate_limit_reset_at
             else None,
@@ -551,38 +596,86 @@ class GitHubClient:
             ).isoformat()
             if self._rate_limited_until > time.time()
             else None,
+            "limit_kind": self._rate_limit_kind,
+            "retry_after_seconds": self._retry_after_seconds,
+            "observed_since": self._request_observed_since.isoformat(),
+            "observed_requests": sum(self._request_counts.values()),
+            "operations": operations,
         }
 
     def _capture_rate_limit(self, response: httpx.Response) -> None:
+        limit = response.headers.get("x-ratelimit-limit")
         remaining = response.headers.get("x-ratelimit-remaining")
+        used = response.headers.get("x-ratelimit-used")
+        resource = response.headers.get("x-ratelimit-resource")
         reset = response.headers.get("x-ratelimit-reset")
+        if limit is not None:
+            try:
+                self._rate_limit_limit = int(limit)
+            except ValueError:
+                pass
         if remaining is not None:
             try:
                 self._rate_limit_remaining = int(remaining)
-                GITHUB_RATE_LIMIT_REMAINING.set(self._rate_limit_remaining)
+                GITHUB_RATE_LIMIT_REMAINING.labels(
+                    connection=self.connection_id or "setup"
+                ).set(self._rate_limit_remaining)
             except ValueError:
                 pass
+        if used is not None:
+            try:
+                self._rate_limit_used = int(used)
+            except ValueError:
+                pass
+        if resource:
+            self._rate_limit_resource = resource
         if reset is not None:
             try:
                 self._rate_limit_reset_at = datetime.fromtimestamp(int(reset), UTC)
             except ValueError:
                 pass
 
-    def _rate_limit_delay(self, response: httpx.Response) -> float | None:
+    def _record_response(
+        self, operation: str, method: str, response: httpx.Response
+    ) -> None:
+        status = response.status_code
+        self._request_counts[(operation, status)] += 1
+        self._request_last_at[operation] = datetime.now(UTC)
+        GITHUB_API_REQUESTS.labels(
+            connection=self.connection_id or "setup",
+            operation=operation,
+            method=method.upper(),
+            status=status,
+        ).inc()
+
+    def _rate_limit_delay(self, response: httpx.Response) -> tuple[float, str] | None:
         if response.status_code not in {403, 429}:
             return None
         retry_after = response.headers.get("retry-after")
         remaining = response.headers.get("x-ratelimit-remaining")
         secondary = "secondary rate limit" in response.text.lower()
+        kind = "primary" if remaining == "0" else "secondary"
         if retry_after:
             try:
-                return max(1.0, float(retry_after))
+                delay = max(1.0, float(retry_after))
             except ValueError:
-                return 60.0
+                delay = self._secondary_backoff_seconds
+            if kind == "secondary":
+                self._secondary_backoff_seconds = min(
+                    900.0, max(self._secondary_backoff_seconds * 2, delay * 2)
+                )
+            return delay, kind
         if remaining == "0" and self._rate_limit_reset_at:
-            return max(1.0, self._rate_limit_reset_at.timestamp() - time.time())
+            return (
+                max(1.0, self._rate_limit_reset_at.timestamp() - time.time()),
+                "primary",
+            )
+        if remaining == "0":
+            return 60.0, "primary"
         if secondary or response.status_code == 429:
-            return 60.0
+            delay = self._secondary_backoff_seconds
+            self._secondary_backoff_seconds = min(900.0, delay * 2)
+            return delay, "secondary"
         return None
 
     async def request(
@@ -614,19 +707,32 @@ class GitHubClient:
                 await asyncio.sleep((0.5 * (2**attempt)) + secrets.randbelow(250) / 1000)
                 continue
             self._capture_rate_limit(response)
+            self._record_response(operation, method, response)
             if response.status_code == 401 and not authentication_retried:
                 self.auth.invalidate()
                 token = await self.auth.token(force_refresh=True)
                 authentication_retried = True
                 continue
-            if delay := self._rate_limit_delay(response):
+            if rate_limit := self._rate_limit_delay(response):
+                delay, kind = rate_limit
+                self._request_rate_limited[operation] += 1
                 self._rate_limited_until = time.time() + delay
+                self._rate_limit_kind = kind
+                self._retry_after_seconds = delay
                 until = datetime.fromtimestamp(self._rate_limited_until, UTC).isoformat()
                 GITHUB_API_FAILURES.labels(operation=operation, status=response.status_code).inc()
                 log.warning(
                     "github.rate_limited",
                     operation=operation,
                     status=response.status_code,
+                    kind=kind,
+                    remaining=self._rate_limit_remaining,
+                    reset_at=(
+                        self._rate_limit_reset_at.isoformat()
+                        if self._rate_limit_reset_at
+                        else None
+                    ),
+                    retry_after_seconds=delay,
                     limited_until=until,
                 )
                 raise GitHubRateLimitError(f"GitHub API rate limit is active until {until}")
@@ -642,6 +748,9 @@ class GitHubClient:
                     response=response.text[:500],
                 )
             response.raise_for_status()
+            self._secondary_backoff_seconds = 60.0
+            self._rate_limit_kind = None
+            self._retry_after_seconds = None
             return response.json() if response.content else None
         raise RuntimeError("GitHub API retry exhausted")
 
@@ -942,6 +1051,15 @@ class GitHubClient:
             )
         return list(selected)
 
+    def cached_repositories(self) -> list[str]:
+        credentials = self.credentials(require_installation=False)
+        if not credentials:
+            return []
+        connection = credentials.connection
+        if connection.scope == GitHubScope.REPO and connection.auth_type != "app":
+            return [connection.target_name]
+        return list(self._repositories[1])
+
     @staticmethod
     def workflow_labels(pool: RunnerPoolConfig) -> list[str]:
         labels = pool.effective_labels - ARCHITECTURE_LABELS
@@ -997,14 +1115,13 @@ class GitHubClient:
         refresh: bool = False,
         wait: bool = True,
     ) -> dict[str, Any]:
-        repositories = await self.list_repositories(refresh=refresh)
-        running = bool(self._adoption_task and not self._adoption_task.done())
-        stale = (
-            not self._adoption_scan_completed_monotonic
-            or time.monotonic() - self._adoption_scan_completed_monotonic
-            >= self.settings.adoption_scan_interval
+        repositories = (
+            await self.list_repositories(refresh=True)
+            if refresh
+            else self.cached_repositories()
         )
-        if (refresh or stale) and not running:
+        running = bool(self._adoption_task and not self._adoption_task.done())
+        if refresh and not running:
             scan_targets = self._adoption_scan_targets(repositories)
             self._adoption_scan_started_at = datetime.now(UTC)
             self._adoption_scan_total = len(scan_targets)
@@ -1031,6 +1148,8 @@ class GitHubClient:
         scanning = bool(self._adoption_task and not self._adoption_task.done())
         completed = self._adoption_scan_completed
         total = self._adoption_scan_total
+        estimated_targets = len(self._adoption_scan_targets(repositories))
+        estimated_repository_pages = max(1, (len(repositories) // 100) + 1)
         return {
             "repositories": results,
             "repository_count_total": len(repositories),
@@ -1051,9 +1170,14 @@ class GitHubClient:
                 if self._adoption_scan_completed_at
                 else None
             ),
-            "cached_for_seconds": self.settings.adoption_scan_interval,
+            "automatic_scans": False,
             "scan_concurrency": self.settings.poll_concurrency,
             "scan_batch_size": self.settings.adoption_max_repositories,
+            "next_scan_estimated_requests": {
+                "minimum": estimated_repository_pages + estimated_targets,
+                "maximum": estimated_repository_pages
+                + estimated_targets * (1 + self.settings.adoption_runs_per_repo),
+            },
             **self._adoption_pool_details(pools),
         }
 
@@ -1227,7 +1351,7 @@ class GitHubClient:
         return connection
 
     async def queued_jobs(self, repositories: list[str] | None = None) -> list[WorkflowJob]:
-        repos = repositories or await self.list_repositories()
+        repos = await self.list_repositories() if repositories is None else repositories
         semaphore = asyncio.Semaphore(self.settings.poll_concurrency)
 
         async def scan(repo: str) -> list[WorkflowJob]:
@@ -1461,37 +1585,67 @@ class GitHubClientRegistry:
                 self._repository_errors.pop(connection_id, None)
                 repositories.extend(result)
         if results and len(failures) == len(results):
+            if all(isinstance(error, GitHubRateLimitError) for error in failures):
+                raise failures[0]
             raise RuntimeError(
                 "GitHub repository discovery failed for every connection"
             ) from failures[0]
         return sorted(set(repositories), key=str.lower)
 
+    def cached_repositories(self, connection_id: str) -> list[str]:
+        return self.client(connection_id).cached_repositories()
+
     async def list_runners(
-        self, repositories: list[str] | None = None
+        self,
+        repositories: list[str] | None = None,
+        *,
+        connection_ids: set[str] | None = None,
     ) -> list[dict[str, Any]]:
         selected = {repository.lower() for repository in repositories or []}
+        active_connections = connection_ids or set()
 
         async def scan(client: GitHubClient) -> list[dict[str, Any]]:
             credentials = client.credentials()
             if not credentials:
                 return []
-            if not repositories or credentials.connection.scope == GitHubScope.ORG:
+            connection = credentials.connection
+            connection_id = connection.id
+            if repositories is not None and not repositories and (
+                connection_id not in active_connections
+            ):
+                return []
+            if connection.scope == GitHubScope.ORG:
+                owner_selected = any(
+                    repository.partition("/")[0].lower() == connection.owner.lower()
+                    for repository in repositories or []
+                )
+                if (
+                    repositories is not None
+                    and connection_id not in active_connections
+                    and not owner_selected
+                ):
+                    return []
+                targets = None
+            elif repositories is None:
                 targets = None
             else:
                 targets = [
                     repository
                     for repository in repositories
                     if repository.partition("/")[0].lower()
-                    == credentials.connection.owner.lower()
+                    == connection.owner.lower()
                 ]
                 if not targets:
-                    return []
+                    if connection_id in active_connections:
+                        targets = None
+                    else:
+                        return []
             runners = await client.list_runners(targets)
             return [
                 runner
                 for runner in runners
                 if not selected
-                or credentials.connection.scope == GitHubScope.ORG
+                or connection.scope == GitHubScope.ORG
                 or str(runner.get("repository", "")).lower() in selected
             ]
 
@@ -1511,6 +1665,8 @@ class GitHubClientRegistry:
                 self._runner_errors.pop(connection_id, None)
                 runners.extend(result)
         if results and len(failures) == len(results):
+            if all(isinstance(error, GitHubRateLimitError) for error in failures):
+                raise failures[0]
             raise RuntimeError(
                 "GitHub runner discovery failed for every connection"
             ) from failures[0]
@@ -1561,6 +1717,8 @@ class GitHubClientRegistry:
                 self._queue_errors.pop(connection_id, None)
                 jobs.extend(result)
         if results and len(failures) == len(results):
+            if all(isinstance(error, GitHubRateLimitError) for error in failures):
+                raise failures[0]
             raise RuntimeError(
                 "GitHub queue polling failed for every connection"
             ) from failures[0]
@@ -1614,6 +1772,8 @@ class GitHubClientRegistry:
         scanned_at: list[str] = []
         total = 0
         scanned = 0
+        estimated_minimum = 0
+        estimated_maximum = 0
         errors: list[str] = []
         for client, result in zip(clients, results, strict=True):
             credentials = client.credentials()
@@ -1633,6 +1793,9 @@ class GitHubClientRegistry:
                 )
             total += int(result.get("repository_count_total") or 0)
             scanned += int(result.get("repository_count_scanned") or 0)
+            estimate = result.get("next_scan_estimated_requests") or {}
+            estimated_minimum += int(estimate.get("minimum") or 0)
+            estimated_maximum += int(estimate.get("maximum") or 0)
             scans.append(result.get("scan") or {})
             if result.get("scanned_at"):
                 scanned_at.append(str(result["scanned_at"]))
@@ -1656,9 +1819,13 @@ class GitHubClientRegistry:
                 "error": "; ".join([*errors, *scan_errors]) or None,
             },
             "scanned_at": max(scanned_at, default=None),
-            "cached_for_seconds": self.settings.adoption_scan_interval,
+            "automatic_scans": False,
             "scan_concurrency": self.settings.poll_concurrency,
             "scan_batch_size": self.settings.adoption_max_repositories,
+            "next_scan_estimated_requests": {
+                "minimum": estimated_minimum,
+                "maximum": estimated_maximum,
+            },
             **GitHubClient._adoption_pool_details(pools),
         }
 

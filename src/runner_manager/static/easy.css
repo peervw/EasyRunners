@@ -167,14 +167,26 @@
 .settings-body { border-top: 1px solid var(--border); padding: 18px; }
 .connection-details { margin-bottom: 14px; }
 .connection-list { overflow: hidden; border: 1px solid var(--border); border-radius: var(--radius-sm); }
-.connection-row { min-height: 64px; display: flex; align-items: center; justify-content: space-between; gap: 14px; border-bottom: 1px solid var(--border); padding: 11px 13px; }
-.connection-row:last-child { border-bottom: 0; }
+.connection-item { border-bottom: 1px solid var(--border); }
+.connection-item:last-child { border-bottom: 0; }
+.connection-row { min-height: 64px; display: flex; align-items: center; justify-content: space-between; gap: 14px; padding: 11px 13px; }
 .connection-row-actions { display: flex; align-items: center; gap: 6px; }
 .connection-row-copy { min-width: 0; flex: 1; }
 .connection-row-copy strong, .connection-row-copy small { display: block; }
 .connection-row-copy small { overflow: hidden; margin-top: 2px; color: var(--muted); font-size: 11px; text-overflow: ellipsis; white-space: nowrap; }
 .connection-identity { display: flex; align-items: center; gap: 10px; }
 .provider-mark { width: 34px; height: 34px; display: grid; place-items: center; border: 1px solid var(--border); border-radius: var(--radius-sm); background: var(--surface); font-size: 10px; font-weight: 700; }
+.connection-api-usage { display: grid; gap: 7px; border-top: 1px solid var(--border); background: var(--surface); padding: 10px 13px 12px 61px; }
+.api-quota-heading { display: flex; align-items: center; justify-content: space-between; gap: 12px; color: var(--muted); font-size: 10px; }
+.api-quota-heading span:first-child { color: var(--text-secondary); font-weight: 550; }
+.api-quota-heading .quota-paused { color: var(--warning); }
+.api-quota-track { height: 4px; overflow: hidden; border-radius: 999px; background: var(--border); }
+.api-quota-track span { display: block; height: 100%; border-radius: inherit; background: var(--success); }
+.connection-api-usage details { color: var(--muted); font-size: 10px; }
+.connection-api-usage summary { width: fit-content; cursor: pointer; }
+.api-operation-list { display: grid; gap: 5px; margin-top: 8px; }
+.api-operation-row { display: flex; align-items: center; justify-content: space-between; gap: 12px; }
+.api-operation-row code { color: var(--text-secondary); font-size: 10px; }
 .connection-identity strong, .connection-identity small { display: block; }
 .connection-identity strong { font-size: 13px; }
 .connection-identity small { margin-top: 2px; color: var(--muted); font-size: 11px; }

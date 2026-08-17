@@ -7,6 +7,7 @@ import pytest
 
 from runner_manager.database import Database
 from runner_manager.demand import DemandTracker
+from runner_manager.github import GitHubRateLimitError
 from runner_manager.models import GitHubScope, ManagedRunner, RunnerPoolConfig, WorkflowJob
 from runner_manager.scheduler import Scheduler
 
@@ -43,11 +44,13 @@ class FakeGitHub:
         self.deleted: list[int] = []
         self.tokens = 0
         self.token_repositories: list[str | None] = []
+        self.runner_queries: list[tuple[list[str] | None, set[str] | None]] = []
 
     def connection_for_repository(self, repository):
         return self.store._connection if repository.lower().startswith("peer/") else None
 
-    async def list_runners(self, repositories=None):
+    async def list_runners(self, repositories=None, *, connection_ids=None):
+        self.runner_queries.append((repositories, connection_ids))
         if repositories is None:
             selected = list(self.remote)
         else:
@@ -164,6 +167,11 @@ class FailingGitHub(FakeGitHub):
         raise RuntimeError("GitHub installation token failed")
 
 
+class RateLimitedGitHub(FakeGitHub):
+    async def queued_jobs(self, repositories=None):
+        raise GitHubRateLimitError("GitHub API rate limit is active until reset")
+
+
 class MultiConnectedStore:
     def __init__(self) -> None:
         self._connections = [
@@ -229,6 +237,23 @@ async def test_reconcile_creates_capacity_once_under_concurrency(settings, tmp_p
     await __import__("asyncio").gather(scheduler.reconcile("one"), scheduler.reconcile("two"))
     assert docker.created == 1
     assert github.tokens == 1
+    database.close()
+
+
+@pytest.mark.asyncio
+async def test_idle_reconcile_scopes_runner_discovery_to_zero_repositories(
+    settings, tmp_path: Path
+) -> None:
+    database = Database(tmp_path / "state.sqlite3")
+    demand = DemandTracker(settings.runner_pools, database)
+    github = FakeGitHub()
+    scheduler = Scheduler(settings, github, FakeDocker(), demand)
+
+    await scheduler.reconcile("startup")
+    github.runner_queries.clear()
+    await scheduler.reconcile("scheduled")
+
+    assert github.runner_queries == [([], set())]
     database.close()
 
 
@@ -380,6 +405,26 @@ async def test_unhealthy_github_connection_sends_notification(
             },
         )
     ]
+    database.close()
+
+
+@pytest.mark.asyncio
+async def test_rate_limited_poll_remains_due_for_automatic_recovery(
+    settings, tmp_path: Path
+) -> None:
+    database = Database(tmp_path / "state.sqlite3")
+    scheduler = Scheduler(
+        settings,
+        RateLimitedGitHub(),
+        FakeDocker(),
+        DemandTracker(settings.runner_pools, database),
+        FakeNotifications(),
+    )
+
+    await scheduler.poll_demand(full=True)
+
+    assert scheduler._last_full_poll == 0
+    assert scheduler._last_queue_poll == 0
     database.close()
 
 

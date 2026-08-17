@@ -136,6 +136,16 @@ function repositoryScanSummary() {
   return scanned < total ? `${scanned} of ${total} scanned` : `${total} repositories checked`;
 }
 
+function repositoryScanCost() {
+  const estimate = adoptionData.next_scan_estimated_requests || {};
+  const minimum = Number(estimate.minimum) || 0;
+  const maximum = Number(estimate.maximum) || 0;
+  if (!maximum) return 'No GitHub requests expected';
+  return minimum === maximum
+    ? `About ${maximum} GitHub API ${maximum === 1 ? 'request' : 'requests'}`
+    : `${minimum}–${maximum} GitHub API requests`;
+}
+
 function repositorySummaryFilters(counts) {
   return `<div class="repository-summary" aria-label="Repository migration summary">
     <button class="repository-summary-filter" type="button" data-repository-filter="attention"><strong>${counts.attention}</strong><span>Need attention</span></button>
@@ -176,7 +186,8 @@ function renderRepositoryBrowser() {
   if (githubData.configure_url) manage.href = githubData.configure_url;
   browser.querySelectorAll('.refresh-adoption').forEach(button => {
     button.disabled = Boolean(adoptionData.scan?.scanning);
-    button.textContent = adoptionData.scan?.scanning ? 'Scanning…' : 'Scan now';
+    button.textContent = adoptionData.scan?.scanning ? 'Scanning…' : 'Scan workflows';
+    button.title = repositoryScanCost();
   });
   bindRepositoryControls(browser);
 }
@@ -210,8 +221,8 @@ function renderRepositoryAccess(github, adoption) {
     : '';
   target.innerHTML = `${accessWarning}<section class="repository-access-section" aria-labelledby="repository-access-heading">
     <div class="repository-access-header">
-      <div><h3 id="repository-access-heading">Repositories</h3><p>Workflow migration across connected accounts.</p></div>
-      <button class="secondary compact refresh-adoption" type="button" ${adoptionData.scan?.scanning ? 'disabled' : ''}>${adoptionData.scan?.scanning ? 'Scanning…' : 'Scan now'}</button>
+      <div><h3 id="repository-access-heading">Repositories</h3><p>Workflow checks run only when requested · ${esc(repositoryScanCost())}</p></div>
+      <button class="secondary compact refresh-adoption" type="button" title="${esc(repositoryScanCost())}" ${adoptionData.scan?.scanning ? 'disabled' : ''}>${adoptionData.scan?.scanning ? 'Scanning…' : 'Scan workflows'}</button>
     </div>
     ${repositorySummaryFilters(counts)}
     ${repositoryList}
@@ -478,6 +489,39 @@ function parseTarget(value = '') {
   return {connectionId: connectionId || null, repository: repository || null};
 }
 
+function githubRateLimitPanel(rate = {}) {
+  const remaining = rate.remaining != null && Number.isFinite(Number(rate.remaining))
+    ? Number(rate.remaining)
+    : null;
+  const limit = rate.limit != null && Number.isFinite(Number(rate.limit))
+    ? Number(rate.limit)
+    : null;
+  const observed = Number(rate.observed_requests) || 0;
+  const operations = rate.operations || [];
+  const limitedUntil = rate.limited_until ? new Date(rate.limited_until) : null;
+  const resetAt = rate.reset_at ? new Date(rate.reset_at) : null;
+  const quota = remaining == null
+    ? 'Quota not observed yet'
+    : `${remaining.toLocaleString()}${limit ? ` of ${limit.toLocaleString()}` : ''} requests remaining`;
+  const timing = limitedUntil && limitedUntil > new Date()
+    ? `Paused until ${limitedUntil.toLocaleTimeString()}`
+    : (resetAt ? `Resets ${resetAt.toLocaleTimeString()}` : 'Reset time unavailable');
+  const width = remaining != null && limit
+    ? Math.max(0, Math.min(100, (remaining / limit) * 100))
+    : 0;
+  const operationRows = operations.length
+    ? operations.slice(0, 8).map(operation => `<div class="api-operation-row">
+      <code>${esc(operation.operation)}</code>
+      <span>${Number(operation.requests || 0).toLocaleString()} requests${operation.errors ? ` · ${Number(operation.errors).toLocaleString()} errors` : ''}</span>
+    </div>`).join('')
+    : '<p class="help-text">No installation API calls have been observed since this manager started.</p>';
+  return `<div class="connection-api-usage">
+    <div class="api-quota-heading"><span>${esc(quota)}</span><span class="${limitedUntil && limitedUntil > new Date() ? 'quota-paused' : ''}">${esc(timing)}</span></div>
+    ${limit ? `<div class="api-quota-track" aria-label="${esc(quota)}"><span style="width:${width}%"></span></div>` : ''}
+    <details><summary>${observed.toLocaleString()} requests observed since manager start</summary><div class="api-operation-list">${operationRows}</div></details>
+  </div>`;
+}
+
 function renderGitHubConnections(github, status) {
   githubConnections = github.connections || [];
   githubRepositories = github.repositories || [];
@@ -495,28 +539,38 @@ function renderGitHubConnections(github, status) {
     badge.className = 'badge warning';
   }
   const target = document.querySelector('#connection-details');
+  const expandedUsage = new Set(
+    [...target.querySelectorAll('.connection-item details[open]')]
+      .map(details => details.closest('.connection-item')?.dataset.connectionId)
+      .filter(Boolean),
+  );
   target.innerHTML = githubConnections.length
     ? `<div class="connection-list">${githubConnections.map(item => {
       const connection = item.connection;
-      const count = item.repositories?.length ?? connection.repositories_count ?? 0;
+      const count = item.repositories?.length || connection.repositories_count || 0;
       const mode = item.repository_bound ? 'Repository runners' : 'Organization runners';
       const detail = item.installed
         ? `${mode} · ${count} ${count === 1 ? 'repository' : 'repositories'} · ${connection.webhook_enabled ? 'Webhooks enabled' : 'Polling only'}${item.rate_limit?.remaining == null ? '' : ` · ${item.rate_limit.remaining} API requests left`}`
         : 'Installation is not finished';
       const health = item.healthy ? 'Connected' : (item.installed ? 'Needs attention' : 'Pending');
       const healthClass = item.healthy ? 'online' : (item.installed ? 'warning' : '');
-      return `<div class="connection-row">
-        <span class="provider-mark" aria-hidden="true">GH</span>
-        <div class="connection-row-copy"><strong>${esc(connection.owner)}</strong><small>${esc(detail)}</small></div>
-        <span class="badge ${healthClass}">${health}</span>
-        <div class="connection-row-actions">
-          ${!item.installed && connection.app_slug ? `<a class="button-link secondary compact" href="/setup/github/resume?connection_id=${encodeURIComponent(connection.id)}">Continue</a>` : ''}
-          ${item.configure_url ? `<a class="button-link ghost compact" href="${esc(item.configure_url)}" target="_blank" rel="noopener">Manage</a>` : ''}
-          ${connection.source === 'onboarding' ? `<button class="ghost compact disconnect-github" type="button" data-connection-id="${esc(connection.id)}" data-owner="${esc(connection.owner)}">Disconnect</button>` : ''}
-        </div>
-      </div>`;
+      const refreshCost = 2 + Math.floor(count / 100);
+      return `<article class="connection-item" data-connection-id="${esc(connection.id)}"><div class="connection-row">
+          <span class="provider-mark" aria-hidden="true">GH</span>
+          <div class="connection-row-copy"><strong>${esc(connection.owner)}</strong><small>${esc(detail)}</small></div>
+          <span class="badge ${healthClass}">${health}</span>
+          <div class="connection-row-actions">
+            ${!item.installed && connection.app_slug ? `<a class="button-link secondary compact" href="/setup/github/resume?connection_id=${encodeURIComponent(connection.id)}">Continue</a>` : ''}
+            ${item.installed ? `<button class="ghost compact refresh-github-connection" type="button" data-connection-id="${esc(connection.id)}" data-owner="${esc(connection.owner)}" title="Refresh installation and repository access · about ${refreshCost} GitHub API requests">Refresh access (~${refreshCost})</button>` : ''}
+            ${item.configure_url ? `<a class="button-link ghost compact" href="${esc(item.configure_url)}" target="_blank" rel="noopener">Manage</a>` : ''}
+            ${connection.source === 'onboarding' ? `<button class="ghost compact disconnect-github" type="button" data-connection-id="${esc(connection.id)}" data-owner="${esc(connection.owner)}">Disconnect</button>` : ''}
+          </div>
+        </div>${item.installed ? githubRateLimitPanel(item.rate_limit) : ''}</article>`;
     }).join('')}</div>`
     : '<p class="help-text">No GitHub account is connected yet.</p>';
+  target.querySelectorAll('.connection-item').forEach(item => {
+    if (expandedUsage.has(item.dataset.connectionId)) item.querySelector('details').open = true;
+  });
   document.querySelector('#connection-actions').hidden = !installed.length;
   const setup = document.querySelector('#github-setup');
   if (setup && !githubConnections.length && setup.dataset.dismissed !== 'true') setup.hidden = false;
@@ -790,7 +844,9 @@ function bindDynamic() {
   document.querySelectorAll('.refresh-adoption').forEach(button => {
     button.onclick = async () => {
       button.disabled = true;
-      const result = await action(() => json('/api/repositories/adoption?refresh=true'));
+      const result = await action(() => json('/api/repositories/adoption/scan', {
+        method: 'POST', headers,
+      }));
       if (result) {
         dashboardCache.adoption = result;
         renderRepositoryAccess(githubData, result);
@@ -808,6 +864,16 @@ function bindDynamic() {
         method: 'POST', headers,
       }), `${button.dataset.owner} disconnected locally.`);
       if (result !== undefined) refresh();
+    };
+  });
+  document.querySelectorAll('.refresh-github-connection').forEach(button => {
+    button.onclick = async () => {
+      button.disabled = true;
+      const result = await action(() => json(`/api/github/connections/${encodeURIComponent(button.dataset.connectionId)}/refresh`, {
+        method: 'POST', headers,
+      }), `${button.dataset.owner} access refreshed.`);
+      if (result !== undefined) refresh();
+      else button.disabled = false;
     };
   });
 }
