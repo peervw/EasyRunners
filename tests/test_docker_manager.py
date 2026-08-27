@@ -36,6 +36,20 @@ class FakeContainer:
         return iter([b"diagnostics"]), {"size": 11}
 
 
+class FakeDockerResource:
+    def __init__(self, name: str, labels: dict[str, str]) -> None:
+        self.id = name
+        self.name = name
+        self.attrs = {
+            "Labels": labels,
+            "Created": "2020-01-01T00:00:00Z",
+        }
+        self.removed = False
+
+    def remove(self, **kwargs) -> None:
+        self.removed = True
+
+
 class FakeContainers:
     def __init__(self) -> None:
         self.kwargs: dict[str, Any] | None = None
@@ -62,10 +76,20 @@ class FakeImages:
         return SimpleNamespace(id=f"sha256:{image}")
 
 
+class FakeResources:
+    def __init__(self, resources: list[Any] | None = None) -> None:
+        self.resources = resources or []
+
+    def list(self, **kwargs):
+        return list(self.resources)
+
+
 class FakeClient:
     def __init__(self) -> None:
         self.containers = FakeContainers()
         self.images = FakeImages()
+        self.networks = FakeResources()
+        self.volumes = FakeResources()
 
     def ping(self) -> bool:
         return True
@@ -111,6 +135,10 @@ async def test_create_runner_applies_security_and_resources(settings) -> None:
     assert kwargs["environment"]["RUNNER_TOKEN"].endswith("-token")
     assert kwargs["environment"]["RUNNER_LABELS"] == "deploy,docker"
     assert kwargs["environment"]["RUNNER_GROUP"] == "Deploy"
+    assert kwargs["environment"]["COMPOSE_PROJECT_NAME"].startswith("er-test-")
+    assert kwargs["environment"]["EASY_RUNNERS_RUNNER_ID"] == runner.runner_id
+    assert kwargs["environment"]["RUNNER_DOCKER_MODE"] == "none"
+    assert kwargs["labels"]["com.easy-runners.compose-project"] == runner.compose_project
     assert kwargs["labels"]["com.easy-runners.repository"] == "o/repo"
     assert runner.pool == "deploy"
     assert runner.repository == "o/repo"
@@ -213,6 +241,25 @@ async def test_socket_mode_mounts_socket_and_host_gid(settings, monkeypatch) -> 
 
 
 @pytest.mark.asyncio
+async def test_isolated_mode_uses_privileged_private_daemon(settings) -> None:
+    client = FakeClient()
+    manager = DockerRunnerManager(settings, client)
+    await manager.create_runner(
+        "isolated",
+        RunnerPoolConfig(labels=["docker", "isolated"], docker_mode="isolated"),
+        "token",
+        "https://github.com/o/r",
+    )
+    kwargs = client.containers.kwargs
+    assert kwargs["privileged"] is True
+    assert kwargs["user"] == "0:0"
+    assert "cap_drop" not in kwargs
+    assert "security_opt" not in kwargs
+    assert kwargs["volumes"] == {}
+    assert kwargs["environment"]["DOCKER_HOST"].endswith("easyrunners-docker/docker.sock")
+
+
+@pytest.mark.asyncio
 async def test_remove_archives_then_destroys(settings) -> None:
     client = FakeClient()
     manager = DockerRunnerManager(settings, client)
@@ -228,6 +275,43 @@ async def test_remove_archives_then_destroys(settings) -> None:
     assert client.containers.container.stopped
     assert client.containers.container.removed
     assert (settings.data_dir / "runner-logs/runner-id.tar").read_bytes() == b"diagnostics"
+
+
+@pytest.mark.asyncio
+async def test_runner_teardown_removes_exact_compose_project_resources(settings) -> None:
+    client = FakeClient()
+    project = "er-test-abc123def456"
+    runner_container = client.containers.container
+    sibling = FakeContainer("sibling-container")
+    sibling.name = "job-service"
+    sibling.attrs = {
+        "Config": {"Labels": {"com.docker.compose.project": project}}
+    }
+    owned_network = FakeDockerResource(
+        "job-default", {"com.docker.compose.project": project}
+    )
+    unrelated_network = FakeDockerResource(
+        "customer-default", {"com.docker.compose.project": "customer"}
+    )
+    client.containers.list = lambda **kwargs: [runner_container, sibling]
+    client.networks = FakeResources([owned_network, unrelated_network])
+    manager = DockerRunnerManager(settings, client)
+    runner = ManagedRunner(
+        runner_id="abc123def456",
+        name="runner",
+        pool="default",
+        container_id=runner_container.id,
+        container_status="running",
+        created_at=datetime.now(UTC),
+        compose_project=project,
+    )
+
+    await manager.remove_runner(runner, "test")
+
+    assert sibling.stopped
+    assert sibling.removed
+    assert owned_network.removed
+    assert not unrelated_network.removed
 
 
 @pytest.mark.asyncio
@@ -257,6 +341,69 @@ async def test_diagnostic_capture_and_cleanup_can_be_disabled(settings) -> None:
     settings.runner_log_cleanup_enabled = True
     await manager.prune_logs()
     assert not old.exists()
+
+
+@pytest.mark.asyncio
+async def test_orphan_scan_and_cleanup_only_touch_runner_owned_resources(settings) -> None:
+    configured = settings.model_copy(
+        update={"docker_resource_cleanup_grace_seconds": 30}
+    )
+    client = FakeClient()
+    project = "er-test-deadbeef1234"
+    orphan = FakeContainer("orphan-container")
+    orphan.name = "orphan-container"
+    orphan.status = "exited"
+    orphan.attrs = {
+        "Config": {"Labels": {"com.docker.compose.project": project}},
+        "State": {"Status": "exited"},
+        "Created": "2020-01-01T00:00:00Z",
+    }
+    owned_network = FakeDockerResource(
+        "owned-network", {"com.docker.compose.project": project}
+    )
+    unrelated_network = FakeDockerResource(
+        "unrelated-network", {"com.docker.compose.project": "customer-stack"}
+    )
+    owned_volume = FakeDockerResource(
+        "owned-volume", {"com.docker.compose.project": project}
+    )
+    client.containers.list = lambda **kwargs: [orphan]
+    client.networks = FakeResources([owned_network, unrelated_network])
+    client.volumes = FakeResources([owned_volume])
+    manager = DockerRunnerManager(configured, client)
+
+    inventory = await manager.resource_inventory(refresh=True)
+    assert inventory["counts"] == {
+        "networks": 2,
+        "containers": 1,
+        "stopped_containers": 1,
+        "volumes": 1,
+        "suspected_leftovers": 3,
+        "eligible_leftovers": 3,
+    }
+    preview = await manager.cleanup_orphans(dry_run=True, include_volumes=False)
+    assert {(item["kind"], item["name"]) for item in preview["targets"]} == {
+        ("container", "orphan-container"),
+        ("network", "owned-network"),
+    }
+    assert not orphan.removed
+    assert not unrelated_network.removed
+
+    selected = [
+        item["key"]
+        for item in inventory["targets"]
+        if item["name"] != "owned-network"
+    ]
+    result = await manager.cleanup_orphans(
+        dry_run=False,
+        include_volumes=True,
+        target_keys=selected,
+    )
+    assert len(result["removed"]) == 2
+    assert orphan.removed
+    assert not owned_network.removed
+    assert owned_volume.removed
+    assert not unrelated_network.removed
 
 
 @pytest.mark.asyncio

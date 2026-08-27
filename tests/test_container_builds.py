@@ -59,6 +59,10 @@ def test_one_compose_builds_every_image_from_source() -> None:
     runner_dockerfile = (REPOSITORY_ROOT / "runner" / "Dockerfile").read_text()
     assert len(re.findall(r"^FROM ", runner_dockerfile, flags=re.MULTILINE)) == 1
     assert "rustup toolchain install" in runner_dockerfile
+    entrypoint = (REPOSITORY_ROOT / "runner" / "entrypoint.sh").read_text()
+    assert 'RUNNER_DOCKER_MODE:-none' in entrypoint
+    assert "dockerd" in entrypoint
+    assert "runuser -u runner" in entrypoint
     manager_volumes = services["manager"]["volumes"]
     assert "easy-runners-data:/data" in manager_volumes
     assert all(not volume.startswith("./") for volume in manager_volumes)

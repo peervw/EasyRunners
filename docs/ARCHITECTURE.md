@@ -27,8 +27,16 @@ restored from the embedded database.
 
 Each capacity unit is a fresh container running GitHub's official `config.sh --ephemeral` and
 `run.sh`. GitHub automatically de-registers it after one job; EasyRunners captures diagnostics and
-removes the container. The default Docker socket mode is intentionally simple but gives the workflow
-root-equivalent control of the Docker host. It is suitable only for trusted workflow code.
+removes the container. Socket-mode runners receive a unique Compose project namespace. Teardown and
+a periodic age-gated janitor remove only containers and networks carrying that exact runner-owned
+namespace; volumes require an explicit opt-in. Host-wide counts and the exact eligible targets are
+visible before cleanup, and no global prune operation is used.
+
+Docker socket mode is intentionally simple but gives the workflow root-equivalent control of the
+Docker host. It is suitable only for trusted workflow code. The optional isolated backend instead
+starts a private daemon inside a privileged runner container. This is the only backend that makes
+arbitrary workflow-created Docker resources share the runner's lifecycle, although a separate VM is
+still required for strong isolation from hostile code.
 
 The embedded database holds control-plane authentication, GitHub connection metadata, one-time
 setup state, connection-scoped webhook replay IDs, and bounded history. GitHub App keys remain files

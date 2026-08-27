@@ -15,7 +15,14 @@ from runner_manager.config import Settings
 from runner_manager.demand import DemandTracker
 from runner_manager.docker import DockerRunnerManager, parse_byte_size
 from runner_manager.github import GitHubClientRegistry, GitHubRateLimitError
-from runner_manager.metrics import RECONCILE_DURATION, RUNNER_CREATION_FAILURES, RUNNERS
+from runner_manager.metrics import (
+    DOCKER_CLEANUP_TOTAL,
+    DOCKER_RESOURCES,
+    DOCKER_SUSPECTED_LEFTOVERS,
+    RECONCILE_DURATION,
+    RUNNER_CREATION_FAILURES,
+    RUNNERS,
+)
 from runner_manager.models import GitHubScope, ManagedRunner, RunnerPoolConfig
 from runner_manager.notifications import NotificationManager
 
@@ -79,6 +86,7 @@ class Scheduler:
         self._last_queue_poll = 0.0
         self._last_full_poll = 0.0
         self._last_runner_sweep = 0.0
+        self._last_resource_cleanup = 0.0
         self._pool_errors: dict[str, str] = {}
 
     def start(self) -> None:
@@ -686,6 +694,46 @@ class Scheduler:
         self._runners = live
         self._update_metrics()
         await self.docker.prune_logs()
+        await self._maintain_docker_resources()
+
+    async def _maintain_docker_resources(self) -> None:
+        now = monotonic()
+        if (
+            self._last_resource_cleanup
+            and now - self._last_resource_cleanup
+            < self.settings.docker_resource_cleanup_interval_seconds
+        ):
+            return
+        self._last_resource_cleanup = now
+        try:
+            inventory = await self.docker.resource_inventory(refresh=True)
+            counts = inventory["counts"]
+            DOCKER_RESOURCES.labels(kind="networks").set(counts["networks"])
+            DOCKER_RESOURCES.labels(kind="stopped_containers").set(counts["stopped_containers"])
+            DOCKER_RESOURCES.labels(kind="volumes").set(counts["volumes"])
+            DOCKER_SUSPECTED_LEFTOVERS.set(counts["suspected_leftovers"])
+            if inventory["warning"] and self.notifications:
+                await self.notifications.send(
+                    "docker_address_pool_pressure",
+                    "Docker network count is approaching its warning threshold",
+                    "Clean up runner-owned leftovers before Docker exhausts its address pools.",
+                    details={
+                        "networks": counts["networks"],
+                        "warning_threshold": inventory["network_warning_threshold"],
+                        "suspected_leftovers": counts["suspected_leftovers"],
+                        "eligible_leftovers": counts["eligible_leftovers"],
+                    },
+                    key="docker_address_pool_pressure",
+                )
+            if self.settings.docker_resource_cleanup_enabled and counts["eligible_leftovers"]:
+                cleanup = await self.docker.cleanup_orphans(
+                    dry_run=False,
+                    include_volumes=self.settings.docker_resource_cleanup_volumes,
+                )
+                for resource in cleanup["removed"]:
+                    DOCKER_CLEANUP_TOTAL.labels(kind=resource["kind"]).inc()
+        except Exception as exc:
+            log.warning("docker.resource_maintenance_failed", error=str(exc))
 
     async def _notify_github_unhealthy(self, error: str, *, operation: str) -> None:
         if not self.notifications:
@@ -815,6 +863,10 @@ class Scheduler:
                 "manual_floors": manual_floors,
             }
         connections = self.github.store.connections(include_incomplete=False)
+        try:
+            docker_resources = await self.docker.resource_inventory()
+        except Exception as exc:
+            docker_resources = {"available": False, "error": str(exc)}
         return {
             "github": "connected" if self._github_connected else "disconnected",
             "docker": "connected" if self._docker_connected else "disconnected",
@@ -822,6 +874,7 @@ class Scheduler:
             "connections": len(connections),
             "pools": pools,
             "host": host,
+            "docker_resources": docker_resources,
             "last_reconcile": self._last_reconcile.isoformat() if self._last_reconcile else None,
             "last_error": self._last_error,
             "time": now.isoformat(),

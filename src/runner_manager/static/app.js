@@ -18,6 +18,7 @@ let repositoryBrowserReturnFocus = null;
 let repositoryBrowserFilter = 'attention';
 let repositoryBrowserQuery = '';
 let repositoryBrowserPage = 1;
+let dockerCleanupPreview = null;
 const repositoryBrowserPageSize = 25;
 
 function toast(message, kind = 'error') {
@@ -49,7 +50,15 @@ function resourceItem(label, value, detail, percent) {
   return `<div class="resource-item"><div><span>${esc(label)}</span><strong>${esc(value)}</strong></div><small>${esc(detail)}</small><progress value="${bounded}" max="100">${bounded}%</progress></div>`;
 }
 
-function renderHost(host) {
+function dockerModeLabel(mode) {
+  return {
+    socket: 'Host Docker socket',
+    isolated: 'Isolated Docker daemon',
+    none: 'No Docker access',
+  }[mode] || mode;
+}
+
+function renderHost(host, dockerResources = {}) {
   const badge = document.querySelector('#host-badge');
   const target = document.querySelector('#host-resources');
   if (!host?.available) {
@@ -61,7 +70,9 @@ function renderHost(host) {
   const cpuUsed = Math.max(0, host.cpus_total - host.cpus_available);
   const memoryUsed = Math.max(0, host.memory_total_bytes - host.memory_available_bytes);
   const diskUsedPercent = host.disk_free_percent == null ? 0 : 100 - host.disk_free_percent;
-  const pressure = host.pressure || [];
+  const pressure = [...(host.pressure || [])];
+  const dockerCounts = dockerResources.counts || {};
+  if (dockerResources.warning) pressure.push('docker networks');
   badge.textContent = pressure.length ? `Pressure: ${pressure.join(', ')}` : 'Healthy';
   badge.className = `badge ${pressure.length ? 'warning' : 'online'}`;
   target.innerHTML = [
@@ -69,7 +80,38 @@ function renderHost(host) {
     resourceItem('Memory', `${formatBytes(host.memory_available_bytes)} free`, `${formatBytes(memoryUsed)} of ${formatBytes(host.memory_total_bytes)} reserved`, host.memory_total_bytes ? memoryUsed * 100 / host.memory_total_bytes : 0),
     resourceItem('Disk', `${formatBytes(host.disk_free_bytes)} free`, `${host.disk_free_percent ?? '—'}% available`, diskUsedPercent),
     resourceItem('Runner capacity', `${host.available_runner_capacity} more`, `${host.active_runners} active across all pools`, host.active_runners + host.available_runner_capacity ? host.active_runners * 100 / (host.active_runners + host.available_runner_capacity) : 0),
+    resourceItem('Docker networks', `${dockerCounts.networks ?? '—'} total`, `Warning at ${dockerResources.network_warning_threshold ?? '—'}`, dockerResources.network_warning_threshold ? (dockerCounts.networks || 0) * 100 / dockerResources.network_warning_threshold : 0),
+    resourceItem('CI leftovers', `${dockerCounts.suspected_leftovers ?? '—'} suspected`, `${dockerCounts.stopped_containers ?? '—'} stopped containers · ${dockerCounts.volumes ?? '—'} volumes`, dockerCounts.suspected_leftovers ? 100 : 0),
   ].join('');
+}
+
+function renderDockerResources(resources = {}, targets = null) {
+  const counts = resources.counts || {};
+  const badge = document.querySelector('#docker-cleanup-badge');
+  const summary = document.querySelector('#docker-cleanup-summary');
+  const list = document.querySelector('#docker-cleanup-targets');
+  if (!badge || !summary || !list) return;
+  if (resources.available === false) {
+    badge.textContent = 'Unavailable';
+    badge.className = 'badge offline';
+    summary.textContent = resources.error || 'Docker resource inventory is unavailable.';
+    list.innerHTML = '<li class="muted">No cleanup preview is available.</li>';
+    const cleanupButton = document.querySelector('#run-docker-cleanup');
+    if (cleanupButton) cleanupButton.disabled = true;
+    return;
+  }
+  const leftovers = Number(counts.suspected_leftovers) || 0;
+  badge.textContent = resources.warning ? 'Network warning' : (leftovers ? `${leftovers} suspected` : 'Clean');
+  badge.className = `badge ${resources.warning || leftovers ? 'warning' : 'online'}`;
+  summary.textContent = `${counts.networks ?? '—'} networks · ${counts.stopped_containers ?? '—'} stopped containers · ${counts.volumes ?? '—'} volumes · cleanup ${resources.cleanup_enabled ? 'on' : 'off'}`;
+  const shown = targets || resources.targets || [];
+  list.innerHTML = shown.length
+    ? shown.map(target => `<li><div><strong>${esc(target.kind)} · ${esc(target.name)}</strong><small>${esc(target.compose_project || target.runner_id || 'owned resource')} · ${target.age_seconds == null ? 'age unknown' : duration(target.age_seconds)}</small></div><span class="badge ${target.eligible ? 'warning' : ''}">${target.eligible ? 'eligible' : 'grace period'}</span></li>`).join('')
+    : '<li class="muted">No runner-owned leftovers found.</li>';
+  const includeVolumes = document.querySelector('#docker-cleanup-volumes')?.checked;
+  const eligible = (resources.targets || []).filter(target => target.eligible && (includeVolumes || target.kind !== 'volume'));
+  const cleanupButton = document.querySelector('#run-docker-cleanup');
+  if (cleanupButton) cleanupButton.disabled = eligible.length === 0;
 }
 
 function adoptionMeta(repository = {}) {
@@ -238,7 +280,7 @@ function updateMigrationReplacement() {
   document.querySelector('#migration-runs-on').textContent = line;
   document.querySelector('#copy-migration-runs-on').disabled = !replacement && !adoptionData.recommended_runs_on;
   document.querySelector('#migration-pool-note').textContent = replacement
-    ? `${replacement.docker_mode === 'socket' ? 'Docker socket access' : 'No Docker socket'} · labels: ${replacement.labels.join(', ')}`
+    ? `${dockerModeLabel(replacement.docker_mode)} · labels: ${replacement.labels.join(', ')}`
     : '';
 }
 
@@ -266,7 +308,7 @@ function openMigrationDrawer(repositoryName, trigger = null) {
     : '<div class="migration-empty"><strong>No hosted-runner jobs detected</strong><p>Only a bounded sample of recent workflow jobs is checked. Run the workflow, then scan again to verify it.</p></div>';
   const pool = document.querySelector('#migration-pool');
   pool.innerHTML = Object.entries(adoptionData.replacements || {}).map(([name, replacement]) =>
-    `<option value="${esc(name)}">${esc(name)} · ${esc(replacement.docker_mode === 'socket' ? 'Docker' : 'no Docker')}</option>`,
+    `<option value="${esc(name)}">${esc(name)} · ${esc(dockerModeLabel(replacement.docker_mode))}</option>`,
   ).join('');
   if (adoptionData.recommended_pool && adoptionData.replacements?.[adoptionData.recommended_pool]) {
     pool.value = adoptionData.recommended_pool;
@@ -685,7 +727,8 @@ async function refresh() {
     renderVersions(versions);
     renderReadiness(readiness);
     renderUsage(usage);
-    renderHost(status.host);
+    renderHost(status.host, status.docker_resources);
+    renderDockerResources(status.docker_resources || {}, dockerCleanupPreview);
     renderRepositoryAccess(github, adoption);
     renderNotifications(notifications);
     renderSetupChecklist(github, readiness, history);
@@ -699,7 +742,7 @@ async function refresh() {
       return `
       <article class="pool-card">
         <div class="pool-heading">
-          <div class="pool-title"><span class="pool-avatar">${esc(name.slice(0, 2))}</span><div><h3>${esc(name)}</h3><small>${pool.config.docker_mode === 'socket' ? 'Docker socket' : 'No Docker access'} · min ${pool.min}, max ${pool.max}${pool.available_capacity == null ? '' : ` · ${pool.available_capacity} host slots free`}</small></div></div>
+          <div class="pool-title"><span class="pool-avatar">${esc(name.slice(0, 2))}</span><div><h3>${esc(name)}</h3><small>${esc(dockerModeLabel(pool.config.docker_mode))} · min ${pool.min}, max ${pool.max}${pool.available_capacity == null ? '' : ` · ${pool.available_capacity} host slots free`}</small></div></div>
           <div class="pool-heading-actions"><span class="badge ${healthClass}" title="${esc(healthDetail)}">${esc(healthLabel)}</span><div class="pool-card-actions"><button class="ghost compact edit-pool" data-pool="${esc(name)}" title="Edit pool">Edit</button><button class="ghost compact delete-pool" data-pool="${esc(name)}" title="Delete pool">Delete</button></div></div>
         </div>
         <div class="pool-stats">
@@ -929,6 +972,49 @@ document.querySelector('#clear-diagnostics')?.addEventListener('click', async ()
   const result = await action(() => json('/api/diagnostics', {method: 'DELETE', headers}), 'Diagnostics deleted.');
   if (result) refresh();
 });
+document.querySelector('#docker-cleanup-volumes')?.addEventListener('change', () => {
+  renderDockerResources(dashboardCache.status?.docker_resources || {}, dockerCleanupPreview);
+});
+document.querySelector('#preview-docker-cleanup')?.addEventListener('click', async () => {
+  const includeVolumes = document.querySelector('#docker-cleanup-volumes').checked;
+  const result = await action(() => json('/api/docker/resources/cleanup', {
+    method: 'POST', headers, body: JSON.stringify({dry_run: true, include_volumes: includeVolumes}),
+  }));
+  if (!result) return;
+  dockerCleanupPreview = result.targets;
+  renderDockerResources(dashboardCache.status?.docker_resources || {}, dockerCleanupPreview);
+  toast(result.targets.length ? `Preview contains ${result.targets.length} exact cleanup targets.` : 'No eligible cleanup targets.', 'success');
+});
+document.querySelector('#run-docker-cleanup')?.addEventListener('click', async () => {
+  const includeVolumes = document.querySelector('#docker-cleanup-volumes').checked;
+  const preview = await action(() => json('/api/docker/resources/cleanup', {
+    method: 'POST', headers, body: JSON.stringify({dry_run: true, include_volumes: includeVolumes}),
+  }));
+  if (!preview || !preview.targets.length) {
+    toast('No eligible cleanup targets.', 'success');
+    return;
+  }
+  dockerCleanupPreview = preview.targets;
+  renderDockerResources(dashboardCache.status?.docker_resources || {}, dockerCleanupPreview);
+  const names = preview.targets.map(target => `${target.kind}: ${target.name}`).join('\n');
+  if (!window.confirm(`Remove these ${preview.targets.length} runner-owned Docker resources?\n\n${names}`)) return;
+  const result = await action(() => json('/api/docker/resources/cleanup', {
+    method: 'POST', headers, body: JSON.stringify({
+      dry_run: false,
+      include_volumes: includeVolumes,
+      target_keys: preview.targets.map(target => target.key),
+    }),
+  }));
+  if (result) {
+    if (result.errors?.length) {
+      toast(`${result.removed.length} resources removed; ${result.errors.length} could not be removed.`);
+    } else {
+      toast(`${result.removed.length} runner-owned resources removed.`, 'success');
+    }
+    dockerCleanupPreview = null;
+    refresh();
+  }
+});
 document.querySelector('#github-setup')?.addEventListener('submit', async event => {
   event.preventDefault();
   const progress = document.querySelector('#setup-progress');
@@ -985,6 +1071,10 @@ document.querySelector('#standard-pool')?.addEventListener('click', () => fillPo
 document.querySelector('#docker-pool')?.addEventListener('click', () => fillPool('docker', {
   labels: ['self-hosted', 'linux', 'docker'], min: 0, max: 5,
   cpu: 4, memory: '8g', image: null, docker_mode: 'socket',
+}));
+document.querySelector('#isolated-docker-pool')?.addEventListener('click', () => fillPool('isolated-docker', {
+  labels: ['self-hosted', 'linux', 'docker', 'isolated'], min: 0, max: 3,
+  cpu: 4, memory: '8g', image: null, docker_mode: 'isolated', aliases: [],
 }));
 document.querySelector('#export-pools')?.addEventListener('click', async () => {
   await action(async () => {

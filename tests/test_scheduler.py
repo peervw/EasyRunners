@@ -89,6 +89,18 @@ class FakeDocker:
         self.created = 0
         self.created_repositories: list[str | None] = []
         self.created_connections: list[str | None] = []
+        self.cleanup_calls: list[tuple[bool, bool]] = []
+        self.resource_inventory_data = {
+            "counts": {
+                "networks": 4,
+                "stopped_containers": 0,
+                "volumes": 0,
+                "suspected_leftovers": 0,
+                "eligible_leftovers": 0,
+            },
+            "warning": False,
+            "network_warning_threshold": 24,
+        }
 
     async def ping(self):
         return True
@@ -136,6 +148,13 @@ class FakeDocker:
             "disk_total_bytes": 100 * 1024**3,
             "disk_free_bytes": 75 * 1024**3,
         }
+
+    async def resource_inventory(self, *, refresh=False):
+        return self.resource_inventory_data
+
+    async def cleanup_orphans(self, *, dry_run, include_volumes):
+        self.cleanup_calls.append((dry_run, include_volumes))
+        return {"removed": [{"kind": "network"}]}
 
 
 class FakeNotifications:
@@ -318,6 +337,44 @@ async def test_status_reports_host_limited_runner_capacity(settings, tmp_path: P
     assert status["host"]["memory_available_bytes"] == 16 * 1024**3
     assert status["host"]["available_runner_capacity"] == 2
     assert status["pools"]["default"]["available_capacity"] == 2
+    database.close()
+
+
+@pytest.mark.asyncio
+async def test_resource_janitor_cleans_owned_orphans_and_warns_on_network_pressure(
+    settings, tmp_path: Path
+) -> None:
+    database = Database(tmp_path / "state.sqlite3")
+    demand = DemandTracker(settings.runner_pools, database)
+    docker = FakeDocker()
+    docker.resource_inventory_data = {
+        "counts": {
+            "networks": 25,
+            "stopped_containers": 1,
+            "volumes": 2,
+            "suspected_leftovers": 2,
+            "eligible_leftovers": 1,
+        },
+        "warning": True,
+        "network_warning_threshold": 24,
+    }
+    notifications = FakeNotifications()
+    scheduler = Scheduler(settings, FakeGitHub(), docker, demand, notifications)
+
+    await scheduler._maintain_docker_resources()
+
+    assert docker.cleanup_calls == [(False, False)]
+    assert notifications.events == [
+        (
+            "docker_address_pool_pressure",
+            {
+                "networks": 25,
+                "warning_threshold": 24,
+                "suspected_leftovers": 2,
+                "eligible_leftovers": 1,
+            },
+        )
+    ]
     database.close()
 
 

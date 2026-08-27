@@ -27,6 +27,7 @@ from runner_manager.github import GitHubClientRegistry, GitHubConnectionStore
 from runner_manager.metrics import WEBHOOK_FAILURES
 from runner_manager.models import (
     DiagnosticSettings,
+    DockerCleanupRequest,
     GitHubConnectRequest,
     GitHubScope,
     GitHubSetupRequest,
@@ -299,6 +300,32 @@ async def api_status(
     request: Request, _: Annotated[AuthContext, Depends(require_auth)]
 ) -> dict[str, Any]:
     return await _scheduler(request).status()
+
+
+@router.get("/api/docker/resources")
+async def api_docker_resources(
+    request: Request, _: Annotated[AuthContext, Depends(require_auth)]
+) -> dict[str, Any]:
+    return cast(
+        dict[str, Any],
+        await request.app.state.docker.resource_inventory(refresh=True),
+    )
+
+
+@router.post("/api/docker/resources/cleanup")
+async def api_cleanup_docker_resources(
+    request: Request,
+    body: DockerCleanupRequest,
+    _: Annotated[AuthContext, Depends(require_mutation)],
+) -> dict[str, Any]:
+    return cast(
+        dict[str, Any],
+        await request.app.state.docker.cleanup_orphans(
+            dry_run=body.dry_run,
+            include_volumes=body.include_volumes,
+            target_keys=body.target_keys,
+        ),
+    )
 
 
 @router.get("/api/runners")

@@ -30,6 +30,7 @@ CREATED_LABEL = "com.easy-runners.created-at"
 REPOSITORY_LABEL = "com.easy-runners.repository"
 CONNECTION_LABEL = "com.easy-runners.connection"
 RUNNER_IMAGE_LABEL = "com.easy-runners.runner-image"
+RUNNER_COMPOSE_PROJECT_LABEL = "com.easy-runners.compose-project"
 COMPOSE_PROJECT_LABEL = "com.docker.compose.project"
 COMPOSE_SERVICE_LABEL = "com.docker.compose.service"
 
@@ -40,6 +41,10 @@ class DockerRunnerManager:
         self.client = client or docker_sdk.DockerClient(base_url=settings.docker_host)
         self._host_cache_at = 0.0
         self._host_cache: dict[str, Any] | None = None
+        self._resource_cache_at = 0.0
+        self._resource_cache: dict[str, Any] | None = None
+        self._resource_handles: dict[tuple[str, str], Any] = {}
+        self._resource_cleanup_lock = asyncio.Lock()
 
     async def close(self) -> None:
         await asyncio.to_thread(self.client.close)
@@ -183,6 +188,7 @@ class DockerRunnerManager:
                     labels=(labels.get("com.easy-runners.labels") or "").split(","),
                     repository=labels.get(REPOSITORY_LABEL) or None,
                     connection_id=labels.get(CONNECTION_LABEL) or None,
+                    compose_project=labels.get(RUNNER_COMPOSE_PROJECT_LABEL) or None,
                     state="exited" if state.get("Status") in {"exited", "dead"} else "starting",
                     exit_code=state.get("ExitCode") if state.get("Status") == "exited" else None,
                 )
@@ -219,25 +225,37 @@ class DockerRunnerManager:
     ) -> ManagedRunner:
         runner_id = uuid.uuid4().hex
         name = f"er-{self.settings.instance_id}-{pool_name}-{runner_id[:8]}"[:64]
+        compose_project = self._runner_compose_project(runner_id)
         now = datetime.now(UTC)
         configured_image = self.settings.image_for_pool(pool)
         image = self._resolve_image(configured_image)
-        environment = {
-            "RUNNER_NAME": name,
-            "RUNNER_URL": target_url,
-            "RUNNER_TOKEN": registration_token,
-            "RUNNER_LABELS": ",".join(pool.custom_labels),
-            "RUNNER_GROUP": pool.runner_group or "",
-            "RUNNER_MAX_LIFETIME": str(pool.max_lifetime),
-            "RUNNER_JOB_TIMEOUT": str(pool.job_timeout),
-        }
-        environment.update(pool.environment)
+        environment = dict(pool.environment)
         for variable in pool.environment_from:
             if variable not in os.environ:
                 raise ValueError(
                     f"pool {pool_name!r} requires missing environment variable {variable}"
                 )
             environment[variable] = os.environ[variable]
+        # These values form the ownership boundary used by automatic cleanup.
+        # Pool configuration cannot override them with a shared project name.
+        environment.update(
+            {
+                "RUNNER_NAME": name,
+                "RUNNER_URL": target_url,
+                "RUNNER_TOKEN": registration_token,
+                "RUNNER_LABELS": ",".join(pool.custom_labels),
+                "RUNNER_GROUP": pool.runner_group or "",
+                "RUNNER_MAX_LIFETIME": str(pool.max_lifetime),
+                "RUNNER_JOB_TIMEOUT": str(pool.job_timeout),
+                "RUNNER_DOCKER_MODE": pool.docker_mode.value,
+                "EASY_RUNNERS_INSTANCE_ID": self.settings.instance_id,
+                "EASY_RUNNERS_RUNNER_ID": runner_id,
+                "EASY_RUNNERS_COMPOSE_PROJECT": compose_project,
+                "COMPOSE_PROJECT_NAME": compose_project,
+            }
+        )
+        if pool.docker_mode == DockerMode.ISOLATED:
+            environment["DOCKER_HOST"] = "unix:///var/run/easyrunners-docker/docker.sock"
 
         labels = {
             MANAGED_LABEL: "true",
@@ -246,6 +264,7 @@ class DockerRunnerManager:
             RUNNER_ID_LABEL: runner_id,
             RUNNER_NAME_LABEL: name,
             CREATED_LABEL: now.isoformat(),
+            RUNNER_COMPOSE_PROJECT_LABEL: compose_project,
             "com.easy-runners.labels": ",".join(sorted(pool.matching_labels)),
         }
         if repository:
@@ -265,20 +284,19 @@ class DockerRunnerManager:
             source, target, mode = _parse_volume(value)
             volumes[source] = {"bind": target, "mode": mode}
 
+        isolated = pool.docker_mode == DockerMode.ISOLATED
         kwargs: dict[str, Any] = {
             "image": image,
             "name": name,
             "detach": True,
             "environment": environment,
             "labels": labels,
-            "user": "1001:1001",
+            "user": "0:0" if isolated else "1001:1001",
             "working_dir": "/home/runner",
             "mem_limit": pool.memory,
             "nano_cpus": int(pool.cpu * 1_000_000_000),
             "pids_limit": pool.pids_limit,
-            "cap_drop": ["ALL"],
-            "security_opt": ["no-new-privileges:true"],
-            "privileged": False,
+            "privileged": isolated,
             "volumes": volumes,
             "group_add": group_add,
             "log_config": LogConfig(
@@ -286,6 +304,9 @@ class DockerRunnerManager:
                 config={"max-size": "10m", "max-file": "3"},
             ),
         }
+        if not isolated:
+            kwargs["cap_drop"] = ["ALL"]
+            kwargs["security_opt"] = ["no-new-privileges:true"]
         if self.settings.runner_network:
             kwargs["network"] = self.settings.runner_network
         container: Container = self.client.containers.run(**kwargs)
@@ -310,6 +331,7 @@ class DockerRunnerManager:
             labels=sorted(pool.matching_labels),
             repository=repository,
             connection_id=connection_id,
+            compose_project=compose_project,
             state="starting",
         )
 
@@ -320,6 +342,8 @@ class DockerRunnerManager:
         try:
             container: Container = self.client.containers.get(runner.container_id)
         except docker_sdk.errors.NotFound:
+            if self.settings.docker_resource_cleanup_enabled:
+                self._remove_runner_resources(runner)
             return
         self._archive_diagnostics(container, runner)
         try:
@@ -327,7 +351,17 @@ class DockerRunnerManager:
             if container.status not in {"exited", "dead"}:
                 container.stop(timeout=30)
         finally:
+            if self.settings.docker_resource_cleanup_enabled:
+                try:
+                    self._remove_runner_resources(runner)
+                except docker_sdk.errors.DockerException:
+                    log.exception(
+                        "runner.resource_cleanup_failed",
+                        runner_id=runner.runner_id,
+                        compose_project=runner.compose_project,
+                    )
             container.remove(force=True, v=True)
+            self._invalidate_resource_cache()
         log.info(
             "runner.removed",
             runner_id=runner.runner_id,
@@ -336,6 +370,280 @@ class DockerRunnerManager:
             container_id=runner.container_id[:12],
             reason=reason,
         )
+
+    def _runner_compose_project(self, runner_id: str) -> str:
+        instance = re.sub(r"[^a-z0-9_-]", "-", self.settings.instance_id.lower())
+        return f"er-{instance}-{runner_id[:12]}"[:63]
+
+    def _runner_project_prefix(self) -> str:
+        return self._runner_compose_project("").rstrip("-") + "-"
+
+    def _remove_runner_resources(self, runner: ManagedRunner) -> None:
+        project = runner.compose_project
+
+        def owned(labels: dict[str, str]) -> bool:
+            explicit = (
+                labels.get(INSTANCE_LABEL) == self.settings.instance_id
+                and labels.get(RUNNER_ID_LABEL) == runner.runner_id
+            )
+            return explicit or bool(project and labels.get(COMPOSE_PROJECT_LABEL) == project)
+
+        containers = self.client.containers.list(all=True)
+        for sibling in containers:
+            if sibling.id == runner.container_id or not owned(_labels_for(sibling)):
+                continue
+            try:
+                sibling.reload()
+                if sibling.status not in {"exited", "dead"}:
+                    sibling.stop(timeout=20)
+                sibling.remove(
+                    force=True,
+                    v=self.settings.docker_resource_cleanup_volumes,
+                )
+                log.info(
+                    "runner.resource_removed",
+                    kind="container",
+                    name=sibling.name,
+                    runner_id=runner.runner_id,
+                )
+            except docker_sdk.errors.NotFound:
+                pass
+            except docker_sdk.errors.DockerException as exc:
+                log.warning(
+                    "runner.resource_remove_failed",
+                    kind="container",
+                    name=sibling.name,
+                    runner_id=runner.runner_id,
+                    error=str(exc),
+                )
+
+        for network in self.client.networks.list():
+            if not owned(_labels_for(network)):
+                continue
+            try:
+                network.remove()
+                log.info(
+                    "runner.resource_removed",
+                    kind="network",
+                    name=network.name,
+                    runner_id=runner.runner_id,
+                )
+            except docker_sdk.errors.NotFound:
+                pass
+            except docker_sdk.errors.DockerException as exc:
+                log.warning(
+                    "runner.resource_remove_failed",
+                    kind="network",
+                    name=network.name,
+                    runner_id=runner.runner_id,
+                    error=str(exc),
+                )
+
+        if self.settings.docker_resource_cleanup_volumes:
+            for volume in self.client.volumes.list():
+                if not owned(_labels_for(volume)):
+                    continue
+                try:
+                    volume.remove(force=False)
+                    log.info(
+                        "runner.resource_removed",
+                        kind="volume",
+                        name=volume.name,
+                        runner_id=runner.runner_id,
+                    )
+                except docker_sdk.errors.NotFound:
+                    pass
+                except docker_sdk.errors.DockerException as exc:
+                    log.warning(
+                        "runner.resource_remove_failed",
+                        kind="volume",
+                        name=volume.name,
+                        runner_id=runner.runner_id,
+                        error=str(exc),
+                    )
+
+    async def resource_inventory(self, *, refresh: bool = False) -> dict[str, Any]:
+        if (
+            not refresh
+            and self._resource_cache is not None
+            and monotonic() - self._resource_cache_at
+            < self.settings.docker_resource_inventory_cache_seconds
+        ):
+            return dict(self._resource_cache)
+        inventory = await asyncio.to_thread(self._resource_inventory)
+        self._resource_cache = inventory
+        self._resource_cache_at = monotonic()
+        return dict(inventory)
+
+    def _resource_inventory(self) -> dict[str, Any]:
+        now = datetime.now(UTC)
+        containers = list(self.client.containers.list(all=True))
+        networks = list(self.client.networks.list())
+        volumes = list(self.client.volumes.list())
+        active_runner_ids: set[str] = set()
+        active_projects: set[str] = set()
+        for container in containers:
+            labels = _labels_for(container)
+            if (
+                labels.get(MANAGED_LABEL) == "true"
+                and labels.get(INSTANCE_LABEL) == self.settings.instance_id
+                and _resource_status(container) not in {"exited", "dead", "removing"}
+            ):
+                if runner_id := labels.get(RUNNER_ID_LABEL):
+                    active_runner_ids.add(runner_id)
+                if project := labels.get(RUNNER_COMPOSE_PROJECT_LABEL):
+                    active_projects.add(project)
+
+        records: list[dict[str, Any]] = []
+        handles: dict[tuple[str, str], Any] = {}
+        for kind, resources in (
+            ("container", containers),
+            ("network", networks),
+            ("volume", volumes),
+        ):
+            for resource in resources:
+                labels = _labels_for(resource)
+                runner_id = labels.get(RUNNER_ID_LABEL)
+                project = labels.get(COMPOSE_PROJECT_LABEL) or labels.get(
+                    RUNNER_COMPOSE_PROJECT_LABEL
+                )
+                explicitly_owned = labels.get(INSTANCE_LABEL) == self.settings.instance_id and bool(
+                    runner_id
+                )
+                project_owned = bool(project and project.startswith(self._runner_project_prefix()))
+                if not explicitly_owned and not project_owned:
+                    continue
+                owner_active = bool(
+                    (runner_id and runner_id in active_runner_ids)
+                    or (project and project in active_projects)
+                )
+                if owner_active:
+                    continue
+                resource_id = _resource_id(resource)
+                created_at = _resource_created_at(resource)
+                age_seconds = (
+                    max(0, int((now - created_at).total_seconds())) if created_at else None
+                )
+                eligible = bool(
+                    age_seconds is not None
+                    and age_seconds >= self.settings.docker_resource_cleanup_grace_seconds
+                )
+                record = {
+                    "key": f"{kind}:{resource_id}",
+                    "kind": kind,
+                    "id": resource_id,
+                    "name": getattr(resource, "name", resource_id),
+                    "runner_id": runner_id,
+                    "compose_project": project,
+                    "status": _resource_status(resource),
+                    "created_at": created_at.isoformat() if created_at else None,
+                    "age_seconds": age_seconds,
+                    "eligible": eligible,
+                    "reason": (
+                        "runner is no longer active"
+                        if eligible
+                        else "waiting for cleanup grace period"
+                    ),
+                }
+                records.append(record)
+                handles[(kind, resource_id)] = resource
+
+        records.sort(key=lambda item: (item["kind"], item["name"]))
+        eligible_records = [record for record in records if record["eligible"]]
+        self._resource_handles = handles
+        return {
+            "counts": {
+                "networks": len(networks),
+                "containers": len(containers),
+                "stopped_containers": sum(
+                    _resource_status(container) in {"exited", "dead"} for container in containers
+                ),
+                "volumes": len(volumes),
+                "suspected_leftovers": len(records),
+                "eligible_leftovers": len(eligible_records),
+            },
+            "warning": len(networks) >= self.settings.docker_network_warning_threshold,
+            "network_warning_threshold": self.settings.docker_network_warning_threshold,
+            "cleanup_enabled": self.settings.docker_resource_cleanup_enabled,
+            "cleanup_volumes": self.settings.docker_resource_cleanup_volumes,
+            "grace_seconds": self.settings.docker_resource_cleanup_grace_seconds,
+            "targets": records,
+            "scanned_at": now.isoformat(),
+        }
+
+    async def cleanup_orphans(
+        self,
+        *,
+        dry_run: bool = True,
+        include_volumes: bool = False,
+        target_keys: list[str] | None = None,
+    ) -> dict[str, Any]:
+        async with self._resource_cleanup_lock:
+            return await asyncio.to_thread(
+                self._cleanup_orphans,
+                dry_run,
+                include_volumes,
+                target_keys,
+            )
+
+    def _cleanup_orphans(
+        self,
+        dry_run: bool,
+        include_volumes: bool,
+        target_keys: list[str] | None,
+    ) -> dict[str, Any]:
+        inventory = self._resource_inventory()
+        self._resource_cache = inventory
+        self._resource_cache_at = monotonic()
+        selected_keys = set(target_keys) if target_keys is not None else None
+        targets = [
+            target
+            for target in inventory["targets"]
+            if target["eligible"]
+            and (include_volumes or target["kind"] != "volume")
+            and (selected_keys is None or target["key"] in selected_keys)
+        ]
+        result: dict[str, Any] = {
+            "dry_run": dry_run,
+            "include_volumes": include_volumes,
+            "target_keys": [target["key"] for target in targets],
+            "targets": targets,
+            "removed": [],
+            "errors": [],
+        }
+        if dry_run:
+            return result
+
+        handles = getattr(self, "_resource_handles", {})
+        order = {"container": 0, "network": 1, "volume": 2}
+        for target in sorted(targets, key=lambda item: order[item["kind"]]):
+            resource = handles.get((target["kind"], target["id"]))
+            if resource is None:
+                continue
+            try:
+                if target["kind"] == "container":
+                    resource.reload()
+                    if resource.status not in {"exited", "dead"}:
+                        resource.stop(timeout=20)
+                    resource.remove(force=True, v=include_volumes)
+                elif target["kind"] == "volume":
+                    resource.remove(force=False)
+                else:
+                    resource.remove()
+                result["removed"].append(target)
+            except docker_sdk.errors.NotFound:
+                result["removed"].append(target)
+            except docker_sdk.errors.DockerException as exc:
+                result["errors"].append({**target, "error": str(exc)})
+        self._invalidate_resource_cache()
+        result["inventory"] = self._resource_inventory()
+        self._resource_cache = result["inventory"]
+        self._resource_cache_at = monotonic()
+        return result
+
+    def _invalidate_resource_cache(self) -> None:
+        self._resource_cache = None
+        self._resource_cache_at = 0.0
 
     def _archive_diagnostics(self, container: Container, runner: ManagedRunner) -> None:
         if not self.settings.runner_log_capture_enabled:
@@ -377,6 +685,41 @@ def _parse_datetime(value: str | None) -> datetime:
     if not value:
         return datetime.now(UTC)
     return datetime.fromisoformat(value.replace("Z", "+00:00"))
+
+
+def _labels_for(resource: Any) -> dict[str, str]:
+    attrs = getattr(resource, "attrs", {}) or {}
+    labels = attrs.get("Config", {}).get("Labels")
+    if labels is None:
+        labels = attrs.get("Labels")
+    return dict(labels or {})
+
+
+def _resource_id(resource: Any) -> str:
+    return str(
+        getattr(resource, "id", None)
+        or getattr(resource, "name", None)
+        or (getattr(resource, "attrs", {}) or {}).get("Name")
+        or "unknown"
+    )
+
+
+def _resource_status(resource: Any) -> str | None:
+    attrs = getattr(resource, "attrs", {}) or {}
+    state = attrs.get("State") or {}
+    return str(state.get("Status") or getattr(resource, "status", "") or "") or None
+
+
+def _resource_created_at(resource: Any) -> datetime | None:
+    attrs = getattr(resource, "attrs", {}) or {}
+    value = attrs.get("Created") or attrs.get("CreatedAt")
+    if not value:
+        return None
+    try:
+        parsed = datetime.fromisoformat(str(value).replace("Z", "+00:00"))
+        return parsed if parsed.tzinfo else parsed.replace(tzinfo=UTC)
+    except (TypeError, ValueError):
+        return None
 
 
 def _parse_volume(value: str) -> tuple[str, str, str]:
