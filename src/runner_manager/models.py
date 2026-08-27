@@ -16,6 +16,7 @@ class GitHubScope(StrEnum):
 
 class DockerMode(StrEnum):
     SOCKET = "socket"
+    ISOLATED = "isolated"
     NONE = "none"
 
 
@@ -138,6 +139,7 @@ class ManagedRunner(BaseModel):
     labels: list[str] = Field(default_factory=list)
     repository: str | None = None
     connection_id: str | None = None
+    compose_project: str | None = None
     state: Literal["starting", "idle", "busy", "exited", "unknown"] = "starting"
     github_runner_id: int | None = None
     github_status: str | None = None
@@ -193,3 +195,9 @@ class DiagnosticSettings(BaseModel):
     capture_enabled: bool = True
     cleanup_enabled: bool = True
     retention_days: int = Field(default=7, ge=1, le=365)
+
+
+class DockerCleanupRequest(BaseModel):
+    dry_run: bool = True
+    include_volumes: bool = False
+    target_keys: list[str] | None = Field(default=None, max_length=1000)

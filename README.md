@@ -79,6 +79,8 @@ Behind that simple setup:
   repositories.
 - The universal runner image includes Docker tooling, Python, Rust, and common build tools.
 - The standard pool has no Docker socket; the Docker pool is available when a job needs it.
+- Docker Compose jobs get a unique project name, so their containers and networks can be cleaned
+  with the runner instead of accumulating on the host.
 - No Kubernetes, external database, queue, or registry login is required.
 
 GitHub still owns workflows, scheduling, logs, secrets, and results. EasyRunners supplies official
@@ -227,6 +229,15 @@ runner_pools:
     max_lifetime: 3900
     docker_mode: socket
 
+  # Optional: private Docker daemon and storage inside each runner container.
+  isolated-docker:
+    labels: [self-hosted, linux, docker, isolated]
+    min: 0
+    max: 3
+    cpu: 4
+    memory: 8g
+    docker_mode: isolated
+
   deploy:
     labels: [self-hosted, linux, deploy]
     min: 0
@@ -330,6 +341,25 @@ is convenient for Docker builds, but **Docker socket access is root-equivalent a
 A workflow can inspect containers, mount host paths, and read manager secrets. Filesystem isolation
 between jobs does not mitigate a malicious workflow.
 
+Every socket-mode runner receives a unique `COMPOSE_PROJECT_NAME` plus
+`EASY_RUNNERS_RUNNER_ID`, `EASY_RUNNERS_INSTANCE_ID`, and `EASY_RUNNERS_COMPOSE_PROJECT`. Ordinary
+`docker compose` commands inherit the project name automatically. EasyRunners removes containers
+and networks with that exact project label when the runner ends, and a periodic scan repairs cleanup
+missed during a manager or host restart. Named volumes are retained by default; opt into their
+automatic removal with `DOCKER_RESOURCE_CLEANUP_VOLUMES=true`, or select them explicitly in the
+dashboard cleanup preview. EasyRunners never runs a global Docker prune.
+
+Raw `docker run`, `docker network create`, and `docker volume create` commands do not inherit Compose
+labels. Prefer Compose, or pass the values above as explicit `com.easy-runners.instance` and
+`com.easy-runners.runner-id` labels if the resources should be eligible for runner cleanup.
+
+`docker_mode: isolated` starts a private Docker daemon and storage directory inside the runner
+container. Its images, containers, networks, and volumes disappear with the runner, even if the
+workflow never cleans them up. This is the comprehensive resource-isolation option for Docker jobs,
+but the outer runner container must be privileged. It removes exposure to the host Docker socket;
+it does not make untrusted privileged workloads safe. Verify that the host permits nested Docker and
+use separate VMs for hostile multi-tenant code.
+
 Therefore:
 
 1. Never run arbitrary or unreviewed fork pull-request code on these runners.
@@ -337,19 +367,22 @@ Therefore:
 3. Keep generic CI and production deployment in different pools and preferably on different hosts.
 4. Expose deployment credentials only through the deploy pool.
 5. Use `docker_mode: none` when jobs do not need Docker.
-6. For hostile multi-tenant workloads, use separate VMs or ARC/scale sets rather than this socket
-   architecture. Privileged Docker-in-Docker is deliberately not implemented in v1.
+6. Prefer `docker_mode: isolated` when Docker jobs must not leave arbitrary resources in the host
+   daemon and the privileged-container tradeoff is acceptable.
+7. For hostile multi-tenant workloads, use separate VMs or ARC/scale sets.
 
-Runner containers are otherwise non-privileged, drop capabilities, set `no-new-privileges`, have no
-published ports, run as UID/GID 1001, and receive configurable CPU, memory, PID, job, and lifetime
-limits. Pool-defined host mounts deliberately weaken isolation and must be reviewed.
+None/socket runner containers are otherwise non-privileged, drop capabilities, set
+`no-new-privileges`, have no published ports, run as UID/GID 1001, and receive configurable CPU,
+memory, PID, job, and lifetime limits. Pool-defined host mounts deliberately weaken isolation and
+must be reviewed.
 
 ## Operational visibility and failure webhooks
 
 The dashboard's host card reads Docker host CPU and memory totals plus free space on the persistent
 data filesystem. It subtracts the CPU and memory limits reserved by active runner containers and
 shows how many additional runners each pool can safely start within both its pool maximum and host
-limits. Disk pressure below ten percent free is highlighted. These are scheduling guardrails based
+limits. It also shows Docker networks, stopped containers, volumes, and runner-owned leftovers.
+Disk pressure below ten percent free is highlighted. These are scheduling guardrails based
 on configured container limits, not a replacement for node-level utilization monitoring.
 
 To forward operational failures to Slack-compatible relays, ntfy adapters, incident systems, or
@@ -363,7 +396,10 @@ NOTIFICATION_COOLDOWN_SECONDS=900
 ```
 
 EasyRunners sends JSON events for jobs queued past the threshold, runner startup or registration
-failures, and unhealthy GitHub API connections. When a secret is set, the exact request body is
+failures, unhealthy GitHub connections, and Docker network counts at or above
+`DOCKER_NETWORK_WARNING_THRESHOLD` (24 by default). The threshold is deliberately configurable
+because Docker address-pool layouts differ between hosts.
+When a secret is set, the exact request body is
 signed in `X-EasyRunners-Signature: sha256=…`. Repeated alerts are throttled by event target, and a
 failed notification never blocks runner reconciliation. Configuration status and a **Send test**
 button are available under **Settings → Failure notifications**.
@@ -392,7 +428,9 @@ Endpoints:
 - `GET /api/jobs` for queued and in-progress workflow jobs
 - `GET /api/diagnostics` and `/api/diagnostics/{name}` for retained runner archives; `DELETE
   /api/diagnostics` clears them
-- `GET|PUT /api/settings/diagnostics` for capture, automatic cleanup, and retention settings
+- `GET|PUT /api/settings/diagnostics` for diagnostic-log capture, cleanup, and retention settings
+- `GET /api/docker/resources` for Docker counts and exact conservative orphan candidates;
+  `POST /api/docker/resources/cleanup` previews or removes eligible runner-owned targets
 - `PUT|DELETE /api/pools/{pool}` and YAML pool import/export endpoints
 - `POST /api/pools/{pool}/scale` with
   `{"desired": 2, "ttl_seconds": 600, "connection_id": "…", "repository":
@@ -415,8 +453,9 @@ pool capacity reached, Docker unavailable, or GitHub unavailable. Structured eve
 `runner.created`, `runner.online`, `runner.job_started`,
 `runner.job_finished`, `runner.removed`, `github.api_error`, and `scheduler.reconcile`. Diagnostic
 archives are retained under `/data/runner-logs` for seven days by default. Treat them as sensitive.
-Capture and automatic cleanup are enabled by default and can be changed under **Settings →
-Diagnostics**. The theme selector under **Settings → Appearance** supports system, light, and dark
+Diagnostic capture and old-log cleanup are enabled by default and can be changed under **Settings →
+Diagnostic log retention**. That setting only covers files in `/data/runner-logs`; Docker-resource
+cleanup has its own status and controls. The theme selector under **Settings → Appearance** supports system, light, and dark
 modes and is stored in the browser.
 
 ## Updating

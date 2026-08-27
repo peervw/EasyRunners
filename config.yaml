@@ -10,8 +10,17 @@ manager:
   adoption_max_repositories: 100
   history_limit: 500
   runner_log_capture_enabled: true
+  # These settings only control archived files under /data/runner-logs.
   runner_log_cleanup_enabled: true
   runner_log_retention_days: 7
+
+  # Runner-owned containers and networks are cleaned after each runner and by
+  # a conservative periodic orphan scan. Named volumes are retained by default.
+  docker_resource_cleanup_enabled: true
+  docker_resource_cleanup_volumes: false
+  docker_resource_cleanup_grace_seconds: 300
+  docker_resource_cleanup_interval_seconds: 300
+  docker_network_warning_threshold: 24
 
   # Optional generic JSON webhook for operational failures. Prefer setting the
   # URL and signing secret through environment variables instead of this file.
@@ -48,6 +57,10 @@ runner_pools:
     job_timeout: 3600
     max_lifetime: 3900
     docker_mode: socket
+
+  # For stronger isolation, replace `socket` above with `isolated`. That starts
+  # a private Docker daemon inside each privileged runner container, so all of
+  # its images, containers, networks, and volumes disappear with the runner.
 
   # Keep deploy credentials and mounts out of the standard pool.
   # deploy:

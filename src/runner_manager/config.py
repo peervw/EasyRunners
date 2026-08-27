@@ -53,6 +53,13 @@ class Settings(BaseSettings):
     adoption_max_repositories: int = 100
     host_resource_cache_seconds: int = 15
 
+    docker_resource_cleanup_enabled: bool = True
+    docker_resource_cleanup_volumes: bool = False
+    docker_resource_cleanup_grace_seconds: int = Field(default=300, ge=30)
+    docker_resource_cleanup_interval_seconds: int = Field(default=300, ge=30)
+    docker_resource_inventory_cache_seconds: int = Field(default=15, ge=1)
+    docker_network_warning_threshold: int = Field(default=24, ge=1)
+
     notification_webhook_url: SecretStr | None = None
     notification_webhook_secret: SecretStr | None = None
     notification_stuck_job_seconds: int = 900

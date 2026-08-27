@@ -80,7 +80,7 @@
 .metric-card strong { font-size: 26px; font-weight: 600; line-height: 1; letter-spacing: -0.04em; }
 
 .host-card { margin-bottom: 18px; overflow: hidden; }
-.resource-grid { display: grid; grid-template-columns: repeat(4, minmax(0, 1fr)); }
+.resource-grid { display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); }
 .resource-item { min-width: 0; border-right: 1px solid var(--border); padding: 15px 18px; }
 .resource-item:last-child { border-right: 0; }
 .resource-item span, .resource-item strong, .resource-item small { display: block; }
@@ -307,6 +307,10 @@ button.drawer-close { width: 34px; min-height: 34px; flex: 0 0 auto; padding: 0;
 .diagnostic-form select { margin: 0; }
 .diagnostic-form > button { justify-self: start; }
 .danger-button { color: var(--danger) !important; }
+.docker-cleanup-targets { display: grid; max-height: 280px; margin: 12px 0 0; padding: 0; overflow: auto; list-style: none; }
+.docker-cleanup-targets li { display: flex; align-items: center; justify-content: space-between; gap: 10px; border-top: 1px solid var(--border); padding: 9px 0; font-size: 11px; }
+.docker-cleanup-targets strong, .docker-cleanup-targets small { display: block; overflow-wrap: anywhere; }
+.docker-cleanup-targets small { margin-top: 2px; color: var(--muted); }
 
 .toast-area { position: fixed; right: 18px; bottom: 18px; z-index: 50; width: min(380px, calc(100vw - 36px)); display: grid; gap: 8px; }
 .toast { border: 1px solid var(--border-strong); border-radius: var(--radius); background: var(--background); color: var(--text-secondary); padding: 11px 13px; box-shadow: 0 8px 24px rgba(0, 0, 0, 0.16); font-size: 12px; }

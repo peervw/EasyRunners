@@ -33,6 +33,36 @@ class NoopDocker:
     async def prune_logs(self):
         return None
 
+    async def resource_inventory(self, *, refresh: bool = False):
+        return {
+            "counts": {
+                "networks": 4,
+                "containers": 2,
+                "stopped_containers": 1,
+                "volumes": 3,
+                "suspected_leftovers": 1,
+                "eligible_leftovers": 1,
+            },
+            "warning": False,
+            "network_warning_threshold": 24,
+            "cleanup_enabled": True,
+            "cleanup_volumes": False,
+            "grace_seconds": 300,
+            "targets": [{"kind": "network", "name": "owned", "eligible": True}],
+        }
+
+    async def cleanup_orphans(
+        self, *, dry_run: bool, include_volumes: bool, target_keys=None
+    ):
+        return {
+            "dry_run": dry_run,
+            "include_volumes": include_volumes,
+            "target_keys": target_keys,
+            "targets": [{"kind": "network", "name": "owned", "eligible": True}],
+            "removed": [],
+            "errors": [],
+        }
+
 
 @pytest.fixture
 def client(settings, monkeypatch):
@@ -73,6 +103,29 @@ def test_health_is_public_but_api_is_protected(client) -> None:
     assert test_client.get("/health").json() == {"status": "ok"}
     assert test_client.get("/api/status").status_code == 401
     assert test_client.get("/metrics").status_code == 401
+    assert test_client.get("/api/docker/resources").status_code == 401
+
+
+def test_docker_cleanup_preview_requires_manage_auth(client) -> None:
+    test_client, app = client
+    _, csrf = login(test_client, app)
+    inventory = test_client.get("/api/docker/resources")
+    assert inventory.status_code == 200
+    assert inventory.json()["counts"]["networks"] == 4
+    assert (
+        test_client.post(
+            "/api/docker/resources/cleanup",
+            json={"dry_run": True, "include_volumes": False},
+        ).status_code
+        == 403
+    )
+    preview = test_client.post(
+        "/api/docker/resources/cleanup",
+        headers={"X-CSRF-Token": csrf},
+        json={"dry_run": True, "include_volumes": False, "target_keys": None},
+    )
+    assert preview.status_code == 200
+    assert preview.json()["targets"][0]["name"] == "owned"
 
 
 def test_login_dashboard_csrf_and_api_token(client) -> None:
@@ -90,7 +143,8 @@ def test_login_dashboard_csrf_and_api_token(client) -> None:
     assert 'id="migration-drawer"' in dashboard.text
     assert 'class="card adoption-card"' not in dashboard.text
     assert 'data-activity-tab="diagnostics"' in dashboard.text
-    assert "Diagnostic retention" in dashboard.text
+    assert "Diagnostic log retention" in dashboard.text
+    assert "Runner Docker cleanup" in dashboard.text
     asset_version = app.state.templates.env.globals["asset_version"]
     assert f'/static/app.js?v={asset_version}' in dashboard.text
     versioned_asset = test_client.get(f"/static/app.js?v={asset_version}")

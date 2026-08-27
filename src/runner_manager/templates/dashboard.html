@@ -274,7 +274,7 @@
                   <code>NOTIFICATION_WEBHOOK_URL=https://example.com/hooks/easy-runners</code>
                   <button id="test-notification" class="secondary compact" type="button">Send test</button>
                 </div>
-                <p class="help-text">Set the URL and optional <code>NOTIFICATION_WEBHOOK_SECRET</code> in Compose or Dokploy, then redeploy. Alerts cover stuck jobs, runner startup failures, and unhealthy GitHub connections.</p>
+                <p class="help-text">Set the URL and optional <code>NOTIFICATION_WEBHOOK_SECRET</code> in Compose or Dokploy, then redeploy. Alerts cover stuck jobs, runner startup failures, unhealthy GitHub connections, and Docker network pressure.</p>
               </div>
             </section>
 
@@ -284,6 +284,7 @@
                 <div class="actions">
                   <button id="standard-pool" class="ghost compact" type="button">Standard preset</button>
                   <button id="docker-pool" class="ghost compact" type="button">Docker preset</button>
+                  <button id="isolated-docker-pool" class="ghost compact" type="button">Isolated Docker preset</button>
                 </div>
               </div>
               <div class="settings-body">
@@ -295,7 +296,7 @@
                   <label>CPU cores<input name="cpu" type="number" min="0.1" step="0.1" value="4" required></label>
                   <label>Memory<input name="memory" value="8g" required></label>
                   <label>Runner image<input name="image" placeholder="Default image"></label>
-                  <label>Docker access<select name="docker_mode"><option value="none" selected>No Docker</option><option value="socket">Docker socket</option></select></label>
+                  <label>Docker access<select name="docker_mode"><option value="none" selected>No Docker</option><option value="socket">Host Docker socket</option><option value="isolated">Isolated Docker daemon</option></select></label>
                   <div class="form-submit"><button type="submit">Save pool</button></div>
                 </form>
                 <details class="subtle-details yaml-settings">
@@ -318,7 +319,7 @@
                 </div>
               </section>
               <section class="card settings-card">
-                <div class="settings-row"><div class="settings-copy"><h2>Diagnostic retention</h2><p>Choose what to save and how long to keep it.</p></div></div>
+                <div class="settings-row"><div class="settings-copy"><h2>Diagnostic log retention</h2><p>This only manages saved runner diagnostic logs. Docker resources are handled separately.</p></div></div>
                 <div class="settings-body">
                   <form id="diagnostic-settings-form" class="diagnostic-form">
                     <label class="check-label"><input name="capture_enabled" type="checkbox"> Save runner diagnostics</label>
@@ -334,6 +335,22 @@
                     </label>
                     <button class="secondary compact" type="submit">Save</button>
                   </form>
+                </div>
+              </section>
+              <section class="card settings-card docker-cleanup-card">
+                <div class="settings-row">
+                  <div class="settings-copy"><h2>Runner Docker cleanup</h2><p>Inspect and remove resources owned by runners that are no longer active.</p></div>
+                  <span id="docker-cleanup-badge" class="badge">Loading</span>
+                </div>
+                <div class="settings-body">
+                  <p id="docker-cleanup-summary" class="help-text">Loading Docker resources.</p>
+                  <label class="check-label"><input id="docker-cleanup-volumes" type="checkbox"> Include runner-owned volumes (may delete workflow data)</label>
+                  <div class="actions">
+                    <button id="preview-docker-cleanup" class="secondary compact" type="button">Preview cleanup</button>
+                    <button id="run-docker-cleanup" class="danger-button compact" type="button">Clean eligible resources</button>
+                  </div>
+                  <ul id="docker-cleanup-targets" class="docker-cleanup-targets"></ul>
+                  <p class="help-text">Only exact EasyRunners ownership labels are eligible. This never runs a global Docker prune.</p>
                 </div>
               </section>
             </div>

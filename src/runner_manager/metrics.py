@@ -60,3 +60,17 @@ NOTIFICATION_FAILURES = Counter(
     "Outbound operational notification delivery failures",
     ["event"],
 )
+DOCKER_RESOURCES = Gauge(
+    "github_runner_manager_docker_resources",
+    "Docker host resources visible to EasyRunners by kind",
+    ["kind"],
+)
+DOCKER_SUSPECTED_LEFTOVERS = Gauge(
+    "github_runner_manager_docker_suspected_leftovers",
+    "Runner-owned Docker resources whose runner is no longer active",
+)
+DOCKER_CLEANUP_TOTAL = Counter(
+    "github_runner_manager_docker_cleanup_total",
+    "Runner-owned Docker resources removed by the orphan janitor",
+    ["kind"],
+)
